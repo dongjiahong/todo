@@ -54,13 +54,14 @@ type Syncer struct {
 	store   *store.Store
 	pairing *auth.Pairing
 
-	mu        sync.Mutex
-	prover    string
-	peers     []*peerEntry
-	listening bool
-	boundPort int
-	syncedAt  int64
-	listener  func(string)
+	mu         sync.Mutex
+	prover     string
+	peers      []*peerEntry
+	peerAssets map[string]map[string]struct{}
+	listening  bool
+	boundPort  int
+	syncedAt   int64
+	listener   func(string)
 
 	nudgeCh chan struct{}
 	stopCh  chan struct{}
@@ -70,10 +71,11 @@ type Syncer struct {
 
 func New(st *store.Store) *Syncer {
 	return &Syncer{
-		store:   st,
-		pairing: auth.NewPairing(),
-		nudgeCh: make(chan struct{}, 1),
-		stopCh:  make(chan struct{}),
+		store:      st,
+		pairing:    auth.NewPairing(),
+		peerAssets: make(map[string]map[string]struct{}),
+		nudgeCh:    make(chan struct{}, 1),
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -391,6 +393,12 @@ func (s *Syncer) handleAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.Method {
+	case http.MethodHead:
+		if !s.store.HasAsset(name) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	case http.MethodGet:
 		data, err := s.store.ReadAsset(name)
 		if err != nil {
@@ -674,9 +682,26 @@ func (s *Syncer) syncMissingAssets(client *http.Client, addr, code string, local
 			}
 		}
 	}
-	// Upload local assets referenced by recently updated tasks
+	// Upload local assets referenced by recently updated tasks (skip if peer already has them)
 	for _, t := range localTasks {
 		for _, asset := range t.Attachments {
+			if s.peerHasAsset(addr, asset) {
+				continue
+			}
+			// Check with lightweight HEAD before transferring binary payload
+			if nonce, err := fetchNonce(client, addr); err == nil {
+				if headReq, err := http.NewRequest(http.MethodHead, fmt.Sprintf("http://%s/assets/%s", addr, asset), nil); err == nil {
+					headReq.Header.Set(auth.NonceHeader, nonce)
+					headReq.Header.Set(auth.ProofHeader, auth.Proof(code, nonce))
+					if headResp, err := client.Do(headReq); err == nil {
+						headResp.Body.Close()
+						if headResp.StatusCode == http.StatusOK {
+							s.markPeerAsset(addr, asset)
+							continue
+						}
+					}
+				}
+			}
 			data, err := s.store.ReadAsset(asset)
 			if err != nil {
 				continue
@@ -692,10 +717,34 @@ func (s *Syncer) syncMissingAssets(client *http.Client, addr, code string, local
 			req.Header.Set(auth.NonceHeader, nonce)
 			req.Header.Set(auth.ProofHeader, auth.Proof(code, nonce))
 			if resp, err := client.Do(req); err == nil {
+				if resp.StatusCode == http.StatusOK {
+					s.markPeerAsset(addr, asset)
+				}
 				resp.Body.Close()
 			}
 		}
 	}
+}
+
+func (s *Syncer) peerHasAsset(addr, name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if set, ok := s.peerAssets[addr]; ok {
+		_, exists := set[name]
+		return exists
+	}
+	return false
+}
+
+func (s *Syncer) markPeerAsset(addr, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set, ok := s.peerAssets[addr]
+	if !ok {
+		set = make(map[string]struct{})
+		s.peerAssets[addr] = set
+	}
+	set[name] = struct{}{}
 }
 
 func fetchNonce(client *http.Client, addr string) (string, error) {

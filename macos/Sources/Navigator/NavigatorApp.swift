@@ -216,6 +216,7 @@ struct ContentView: View {
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
+                    listBigHeader
                     switch store.section {
                     case .today:
                         todayView
@@ -224,7 +225,7 @@ struct ContentView: View {
                     case .todo:
                         flatSection(title: "待办", tasks: store.todoTasks, empty: "待办已清空，按 ⌘N 记一笔")
                     case .upcoming:
-                        flatSection(title: "计划", tasks: store.upcomingTasks, empty: "没有设置了截止时间的任务")
+                        upcomingView
                     case .logbook:
                         logbookView
                     case .tag(let tagID):
@@ -236,6 +237,75 @@ struct ContentView: View {
                 .padding(.vertical, 12)
             }
             .navigationTitle(sectionTitle)
+        }
+    }
+
+    @ViewBuilder
+    private var listBigHeader: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                if let icon = sectionIcon {
+                    Image(systemName: icon)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(sectionTint)
+                } else if case .tag(let tagID) = store.section,
+                          let tag = store.liveTags.first(where: { $0.id == tagID }) {
+                    Circle()
+                        .fill(tag.hue.color)
+                        .frame(width: 11, height: 11)
+                }
+                Text(sectionTitle)
+                    .font(.system(size: 22, weight: .bold))
+            }
+            if store.section == .today {
+                Text(DateHelper.todaySubtitle())
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 26)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 2)
+        .padding(.bottom, 8)
+    }
+
+    private var sectionIcon: String? {
+        switch store.section {
+        case .today: return "star.fill"
+        case .doing: return "flame.fill"
+        case .todo: return "tray.fill"
+        case .upcoming: return "calendar"
+        case .logbook: return "book.closed.fill"
+        case .tag: return nil
+        }
+    }
+
+    private var sectionTint: Color {
+        switch store.section {
+        case .today: return NavTheme.todayGold
+        case .doing: return NavTheme.doingBlue
+        case .todo: return NavTheme.inboxBlue
+        case .upcoming: return NavTheme.upcomingCoral
+        case .logbook: return NavTheme.logbookGreen
+        case .tag: return NavTheme.accentBlue
+        }
+    }
+
+    @ViewBuilder
+    private var upcomingView: some View {
+        let items = store.upcomingTasks
+        let grouped = Dictionary(grouping: items) { DateHelper.upcomingGroupTitle(for: $0.dueAt) }
+        let orderedKeys = items.reduce(into: [String]()) { acc, item in
+            let k = DateHelper.upcomingGroupTitle(for: item.dueAt)
+            if !acc.contains(k) { acc.append(k) }
+        }
+        if orderedKeys.isEmpty {
+            emptyState("没有设置了截止时间的任务")
+        } else {
+            ForEach(orderedKeys, id: \.self) { day in
+                sectionHeader(day, count: grouped[day]?.count ?? 0, tint: day == "已逾期" ? NavTheme.danger : .secondary)
+                ForEach(grouped[day] ?? []) { task in row(task) }
+            }
         }
     }
 
@@ -252,7 +322,7 @@ struct ContentView: View {
                     emptyState("没有找到匹配「\(store.searchQuery)」的任务")
                 } else {
                     if !doing.isEmpty {
-                        sectionHeader("进行中", count: doing.count, tint: Color.accentColor)
+                        sectionHeader("进行中", count: doing.count, tint: NavTheme.doingBlue)
                         ForEach(doing) { task in row(task) }
                     }
                     if !todo.isEmpty {
@@ -273,7 +343,7 @@ struct ContentView: View {
     @ViewBuilder
     private var todayView: some View {
         if !store.todayOverdueTasks.isEmpty {
-            sectionHeader("已逾期", count: store.todayOverdueTasks.count, tint: .red)
+            sectionHeader("已逾期", count: store.todayOverdueTasks.count, tint: NavTheme.danger)
             ForEach(store.todayOverdueTasks) { task in row(task) }
         }
 
@@ -374,20 +444,65 @@ struct ContentView: View {
 
 // MARK: - Command Palette (⌘K)
 
+private struct PaletteEntry: Identifiable {
+    let id: String
+    let title: String
+    let icon: String
+    let shortcut: String
+    let group: String
+    let action: () -> Void
+}
+
 struct CommandPaletteView: View {
     @Bindable var store: NavigatorStore
     @State private var query: String = ""
+    @State private var selectedIndex: Int = 0
+    @State private var hoveredID: String?
     @FocusState private var focused: Bool
 
-    private var matchedTasks: [TaskItem] {
+    private var entries: [PaletteEntry] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if q.isEmpty { return Array(store.liveTasks.filter { !$0.isDone }.prefix(6)) }
-        return Array(store.liveTasks.filter {
-            $0.title.lowercased().contains(q) || $0.notes.lowercased().contains(q)
-        }.prefix(8))
+        var list: [PaletteEntry] = [
+            PaletteEntry(id: "cmd_new", title: "新建任务", icon: "plus.circle", shortcut: "⌘N", group: "快捷操作") {
+                store.showCommandPalette = false
+                store.showQuickCapture = true
+            },
+            PaletteEntry(id: "cmd_board", title: "切换列表 / 双列看板", icon: "rectangle.split.2x1", shortcut: "", group: "快捷操作") {
+                store.viewMode = store.viewMode == .list ? .board : .list
+                store.showCommandPalette = false
+            },
+            PaletteEntry(id: "cmd_settings", title: "打开设置（含局域网同步）", icon: "gearshape", shortcut: "⌘,", group: "快捷操作") {
+                store.showCommandPalette = false
+                store.openSettings(tab: .general)
+            },
+            PaletteEntry(id: "cmd_sync", title: "立即同步", icon: "arrow.triangle.2.circlepath", shortcut: "", group: "快捷操作") {
+                store.syncNow()
+                store.showCommandPalette = false
+            }
+        ]
+        if !q.isEmpty {
+            list = list.filter { $0.title.lowercased().contains(q) }
+        }
+        let tasks: [TaskItem] = q.isEmpty
+            ? Array(store.liveTasks.filter { !$0.isDone }.prefix(6))
+            : Array(store.liveTasks.filter { $0.title.lowercased().contains(q) || $0.notes.lowercased().contains(q) }.prefix(8))
+        for task in tasks {
+            list.append(PaletteEntry(
+                id: "task_\(task.id)",
+                title: task.title.isEmpty ? "未命名任务" : task.title,
+                icon: task.isDone ? "checkmark.circle.fill" : "circle",
+                shortcut: task.status.label,
+                group: "任务"
+            ) {
+                store.selectedTaskID = task.id
+                store.showCommandPalette = false
+            })
+        }
+        return list
     }
 
     var body: some View {
+        let items = entries
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "command")
@@ -396,6 +511,11 @@ struct CommandPaletteView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 15))
                     .focused($focused)
+                    .onSubmit {
+                        if items.indices.contains(selectedIndex) {
+                            items[selectedIndex].action()
+                        }
+                    }
                 Button("Esc") { store.showCommandPalette = false }
                     .buttonStyle(.plain)
                     .font(.system(size: 11))
@@ -406,41 +526,52 @@ struct CommandPaletteView: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("快捷操作")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.top, 8)
-
-                    paletteButton("新建任务", icon: "plus.circle", shortcut: "⌘N") {
-                        store.showCommandPalette = false
-                        store.showQuickCapture = true
-                    }
-                    paletteButton("切换列表 / 双列看板", icon: "rectangle.split.2x1", shortcut: "") {
-                        store.viewMode = store.viewMode == .list ? .board : .list
-                        store.showCommandPalette = false
-                    }
-                    paletteButton("打开设置（含局域网同步）", icon: "gearshape", shortcut: "⌘,") {
-                        store.showCommandPalette = false
-                        store.openSettings(tab: .general)
-                    }
-                    paletteButton("立即同步", icon: "arrow.triangle.2.circlepath", shortcut: "") {
-                        store.syncNow()
-                        store.showCommandPalette = false
-                    }
-
-                    if !matchedTasks.isEmpty {
-                        Text("任务")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.top, 10)
-
-                        ForEach(matchedTasks) { task in
-                            paletteButton(task.title.isEmpty ? "未命名任务" : task.title, icon: task.isDone ? "checkmark.circle.fill" : "circle", shortcut: task.status.label) {
-                                store.selectedTaskID = task.id
-                                store.showCommandPalette = false
+                VStack(alignment: .leading, spacing: 2) {
+                    if items.isEmpty {
+                        Text("没有匹配的命令或任务")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.top, 40)
+                    } else {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { idx, entry in
+                            if idx == 0 || items[idx - 1].group != entry.group {
+                                Text(entry.group)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.top, idx == 0 ? 6 : 10)
+                                    .padding(.bottom, 2)
+                            }
+                            let isHighlighted = idx == selectedIndex || hoveredID == entry.id
+                            Button(action: entry.action) {
+                                HStack(spacing: 10) {
+                                    Image(systemName: entry.icon)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(isHighlighted ? NavTheme.accentBlue : .secondary)
+                                        .frame(width: 18)
+                                    Text(entry.title)
+                                        .font(.system(size: 13))
+                                        .lineLimit(1)
+                                    Spacer()
+                                    if !entry.shortcut.isEmpty {
+                                        Text(entry.shortcut)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(isHighlighted ? NavTheme.accentBlue.opacity(0.12) : Color.clear)
+                                )
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .onHover { over in
+                                hoveredID = over ? entry.id : nil
+                                if over { selectedIndex = idx }
                             }
                         }
                     }
@@ -450,30 +581,19 @@ struct CommandPaletteView: View {
         }
         .frame(width: 480, height: 380)
         .onAppear { focused = true }
-    }
-
-    private func paletteButton(_ title: String, icon: String, shortcut: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18)
-                Text(title)
-                    .font(.system(size: 13))
-                    .lineLimit(1)
-                Spacer()
-                if !shortcut.isEmpty {
-                    Text(shortcut)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .contentShape(Rectangle())
+        .onChange(of: query) { _, _ in selectedIndex = 0 }
+        .onKeyPress(.downArrow) {
+            if !items.isEmpty { selectedIndex = (selectedIndex + 1) % items.count }
+            return .handled
         }
-        .buttonStyle(.plain)
+        .onKeyPress(.upArrow) {
+            if !items.isEmpty { selectedIndex = (selectedIndex - 1 + items.count) % items.count }
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            store.showCommandPalette = false
+            return .handled
+        }
     }
 }
 
@@ -486,6 +606,8 @@ struct QuickCaptureView: View {
     @State private var status: TaskStatus = .todo
     @State private var selectedTags: Set<String> = []
     @State private var dueAt: String? = nil
+    @State private var repeatRule: RepeatRule = .none
+    @State private var showDuePopover: Bool = false
     @State private var keepAdding: Bool = false
     @FocusState private var titleFocused: Bool
 
@@ -503,17 +625,41 @@ struct QuickCaptureView: View {
                 .lineLimit(2...4)
 
             HStack(spacing: 8) {
-                Button(dueAt == nil ? "今天" : (DateHelper.dueBadge(dueAt)?.text ?? "今天")) {
-                    dueAt = dueAt == nil ? DateHelper.presetDate(daysOffset: 0, hour: 18) : nil
+                Button {
+                    showDuePopover.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "calendar")
+                            .font(.system(size: 11))
+                        Text(DateHelper.dueBadge(dueAt)?.text ?? "设置时间")
+                            .font(.system(size: 12, weight: .medium))
+                            .monospacedDigit()
+                        if repeatRule != .none {
+                            Text("· \(repeatRule.label)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(NavTheme.accentBlue)
+                        }
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(dueAt != nil ? NavTheme.todayGold.opacity(0.14) : Color.primary.opacity(0.06))
+                    )
+                    .foregroundStyle(dueAt != nil ? NavTheme.todayGold : .secondary)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button("明天") {
-                    dueAt = DateHelper.presetDate(daysOffset: 1, hour: 9)
+                .buttonStyle(.plain)
+                .popover(isPresented: $showDuePopover, arrowEdge: .bottom) {
+                    DueDatePopover(
+                        currentDue: dueAt,
+                        currentRepeat: repeatRule,
+                        onApply: { newDue, newRepeat in
+                            dueAt = newDue
+                            repeatRule = newDue == nil ? .none : newRepeat
+                        },
+                        onDismiss: { showDuePopover = false }
+                    )
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
 
                 Picker("", selection: $status) {
                     Text("待办").tag(TaskStatus.todo)
@@ -528,27 +674,18 @@ struct QuickCaptureView: View {
             FlowLayout(spacing: 6) {
                 ForEach(store.liveTags) { tag in
                     let on = selectedTags.contains(tag.id)
-                    Button {
+                    TagPillView(tag: tag, selected: on, interactive: true) {
                         if on { selectedTags.remove(tag.id) } else { selectedTags.insert(tag.id) }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Circle().fill(tag.hue.color).frame(width: 6, height: 6)
-                            Text(tag.label).font(.system(size: 11.5, weight: .medium))
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(on ? tag.hue.color.opacity(0.16) : Color.primary.opacity(0.06)))
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
             Divider()
 
             HStack {
-                Toggle("连续添加", isOn: $keepAdding)
+                Toggle(keepAdding ? "连续添加（保留日期与标签）" : "连续添加", isOn: $keepAdding)
                     .toggleStyle(.checkbox)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: 12))
                 Spacer()
                 Button("取消") { store.showQuickCapture = false }
                     .keyboardShortcut(.cancelAction)
@@ -558,7 +695,7 @@ struct QuickCaptureView: View {
             }
         }
         .padding(18)
-        .frame(width: 440)
+        .frame(width: 450)
         .onAppear { titleFocused = true }
     }
 
@@ -570,7 +707,8 @@ struct QuickCaptureView: View {
             notes: notes.trimmingCharacters(in: .whitespacesAndNewlines),
             status: status,
             tagIds: Array(selectedTags),
-            dueAt: dueAt
+            dueAt: dueAt,
+            repeatRule: repeatRule
         )
         title = ""
         notes = ""

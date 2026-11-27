@@ -140,7 +140,7 @@ struct TaskDetailView: View {
                                         systemImage: "bell.badge"
                                     )
                                     .font(.system(size: 11.5, weight: .medium))
-                                    .foregroundStyle(Color(red: 0.80, green: 0.48, blue: 0.10))
+                                    .foregroundStyle(NavTheme.todayGold)
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -150,8 +150,8 @@ struct TaskDetailView: View {
                         FlowLayout(spacing: 6) {
                             ForEach(store.liveTags) { tag in
                                 let selected = task.tagIds.contains(tag.id)
-                                Button {
-                                    store.patchTask(id: task.id) { t, now in
+                                TagPillView(tag: tag, selected: selected, interactive: true) {
+                                    store.patchTask(id: task.id, rescheduleNotifications: false) { t, now in
                                         if selected {
                                             t.tagIds.removeAll { $0 == tag.id }
                                         } else {
@@ -159,25 +159,7 @@ struct TaskDetailView: View {
                                         }
                                         t.stamps?["tagIds"] = now
                                     }
-                                } label: {
-                                    HStack(spacing: 5) {
-                                        Circle().fill(tag.hue.color).frame(width: 6, height: 6)
-                                        Text(tag.label)
-                                            .font(.system(size: 11.5, weight: .medium))
-                                            .foregroundStyle(selected ? tag.hue.color : .secondary)
-                                    }
-                                    .padding(.horizontal, 9)
-                                    .padding(.vertical, 4)
-                                    .background(
-                                        Capsule()
-                                            .fill(selected ? tag.hue.color.opacity(0.14) : Color.primary.opacity(0.05))
-                                    )
-                                    .overlay(
-                                        Capsule()
-                                            .strokeBorder(selected ? tag.hue.color.opacity(0.45) : .clear, lineWidth: 1)
-                                    )
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
 
@@ -199,15 +181,13 @@ struct TaskDetailView: View {
                             }
 
                             ForEach(task.subtasks) { sub in
-                                HStack(spacing: 8) {
-                                    Button {
-                                        store.toggleSubtask(taskID: task.id, subtaskID: sub.id)
-                                    } label: {
-                                        Image(systemName: sub.done ? "checkmark.square.fill" : "square")
-                                            .font(.system(size: 14))
-                                            .foregroundStyle(sub.done ? Color(red: 0.16, green: 0.62, blue: 0.42) : .secondary)
-                                    }
-                                    .buttonStyle(.plain)
+                                HStack(spacing: 4) {
+                                    TaskCheckbox(
+                                        checked: sub.done,
+                                        isCircular: true,
+                                        size: 14,
+                                        onToggle: { store.toggleSubtask(taskID: task.id, subtaskID: sub.id) }
+                                    )
 
                                     TextField(
                                         "子任务内容",
@@ -230,7 +210,7 @@ struct TaskDetailView: View {
                                     }
                                     .buttonStyle(.plain)
                                 }
-                                .padding(.vertical, 2)
+                                .padding(.vertical, 1)
                             }
 
                             // Inline quick add subtask

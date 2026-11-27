@@ -99,25 +99,18 @@ func (e *Engine) SaveTaskJSON(taskJSON string) (string, error) {
 // CompleteTask toggles a task between done and todo.
 // When completing a repeating task, automatically spawns the next occurrence in todo.
 func (e *Engine) CompleteTask(taskID string, done bool) (string, error) {
-	state, err := e.store.LoadAll()
+	target, found, err := e.store.GetTask(taskID)
 	if err != nil {
 		return "", err
 	}
-	var target *model.Task
-	for i := range state.Tasks {
-		if state.Tasks[i].ID == taskID {
-			target = &state.Tasks[i]
-			break
-		}
-	}
-	if target == nil {
+	if !found {
 		return "", fmt.Errorf("task not found: %s", taskID)
 	}
 
 	now := time.Now().UnixMilli()
 	toSave := make([]model.Task, 0, 2)
 
-	updated := *target
+	updated := target
 	if done {
 		updated.Status = model.StatusDone
 		updated.CompletedAt = now
@@ -171,27 +164,22 @@ func (e *Engine) CompleteTask(taskID string, done bool) (string, error) {
 }
 
 func (e *Engine) DeleteTask(taskID string, deleted bool) error {
-	state, err := e.store.LoadAll()
-	if err != nil {
+	t, found, err := e.store.GetTask(taskID)
+	if err != nil || !found {
 		return err
 	}
-	for _, t := range state.Tasks {
-		if t.ID == taskID {
-			now := time.Now().UnixMilli()
-			t.Deleted = deleted
-			t.UpdatedAt = now
-			if t.Stamps == nil {
-				t.Stamps = map[string]int64{}
-			}
-			t.Stamps["deleted"] = now
-			_, _, err := e.store.Upsert([]model.Task{t}, nil)
-			if err == nil {
-				e.syncer.Nudge()
-			}
-			return err
-		}
+	now := time.Now().UnixMilli()
+	t.Deleted = deleted
+	t.UpdatedAt = now
+	if t.Stamps == nil {
+		t.Stamps = map[string]int64{}
 	}
-	return nil
+	t.Stamps["deleted"] = now
+	_, _, err = e.store.Upsert([]model.Task{t}, nil)
+	if err == nil {
+		e.syncer.Nudge()
+	}
+	return err
 }
 
 func (e *Engine) SaveTagJSON(tagJSON string) (string, error) {

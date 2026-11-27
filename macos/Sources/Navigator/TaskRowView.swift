@@ -12,30 +12,12 @@ struct TaskRowView: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            // Instant completion circle
-            Button(action: onToggleComplete) {
-                ZStack {
-                    if task.isDone {
-                        Circle()
-                            .fill(Color(red: 0.16, green: 0.62, blue: 0.42))
-                            .frame(width: 17, height: 17)
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 9.5, weight: .bold))
-                            .foregroundStyle(.white)
-                    } else {
-                        Circle()
-                            .strokeBorder(
-                                task.status == .doing ? Color.accentColor : Color.secondary.opacity(0.55),
-                                lineWidth: 1.5
-                            )
-                            .frame(width: 17, height: 17)
-                    }
-                }
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        HStack(alignment: .top, spacing: 8) {
+            TaskCheckbox(
+                checked: task.isDone,
+                isDoing: task.status == .doing,
+                onToggle: onToggleComplete
+            )
             .padding(.top, -1)
 
             VStack(alignment: .leading, spacing: 4) {
@@ -52,7 +34,7 @@ struct TaskRowView: View {
                         Button(action: onToggleDoing) {
                             Image(systemName: task.status == .doing ? "flame.fill" : "flame")
                                 .font(.system(size: 12))
-                                .foregroundStyle(task.status == .doing ? Color.accentColor : .secondary)
+                                .foregroundStyle(task.status == .doing ? NavTheme.doingBlue : .secondary)
                         }
                         .buttonStyle(.plain)
                         .help(task.status == .doing ? "移回待办" : "标记为进行中")
@@ -67,42 +49,37 @@ struct TaskRowView: View {
                 }
 
                 if hasMeta {
-                    HStack(spacing: 10) {
+                    FlowLayout(spacing: 6) {
                         if task.status == .doing && !task.isDone {
-                            Label("进行中", systemImage: "flame.fill")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(Color.accentColor)
+                            HStack(spacing: 3) {
+                                Image(systemName: "flame.fill")
+                                    .font(.system(size: 10))
+                                Text("进行中")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(NavTheme.doingBlue.opacity(0.12), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .foregroundStyle(NavTheme.doingBlue)
                         }
 
                         if let badge = DateHelper.dueBadge(task.dueAt, settled: task.isDone) {
-                            HStack(spacing: 3) {
-                                Image(systemName: "calendar")
-                                    .font(.system(size: 10))
-                                Text(badge.text)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .monospacedDigit()
-                            }
-                            .padding(.horizontal, badge.tone == .normal ? 0 : 6)
-                            .padding(.vertical, badge.tone == .normal ? 0 : 2)
-                            .background(dueBg(badge.tone), in: RoundedRectangle(cornerRadius: 4))
-                            .foregroundStyle(dueFg(badge.tone))
-                        }
-
-                        if task.activeRepeat != .none {
-                            Image(systemName: "repeat")
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(.secondary)
+                            DueBadgeView(
+                                text: badge.text,
+                                tone: badge.tone,
+                                repeating: task.activeRepeat != .none
+                            )
                         }
 
                         if task.checklistTotalCount > 0 {
-                            HStack(spacing: 3) {
-                                Image(systemName: "checklist")
-                                    .font(.system(size: 10.5))
+                            HStack(spacing: 4) {
+                                MiniProgressRing(done: task.checklistDoneCount, total: task.checklistTotalCount)
                                 Text("\(task.checklistDoneCount)/\(task.checklistTotalCount)")
                                     .font(.system(size: 11, weight: .medium))
                                     .monospacedDigit()
                             }
                             .foregroundStyle(.secondary)
+                            .padding(.vertical, 2)
                         }
 
                         if !task.attachmentList.isEmpty {
@@ -115,20 +92,14 @@ struct TaskRowView: View {
                                 }
                             }
                             .foregroundStyle(.secondary)
+                            .padding(.vertical, 2)
                         }
 
                         ForEach(resolvedTags) { tag in
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(tag.hue.color)
-                                    .frame(width: 6, height: 6)
-                                Text(tag.label)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(tag.hue.color)
-                            }
+                            TagPillView(tag: tag)
                         }
                     }
-                    .padding(.top, 1)
+                    .padding(.top, 2)
                 }
             }
         }
@@ -136,11 +107,11 @@ struct TaskRowView: View {
         .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.11) : (hovering ? Color.primary.opacity(0.035) : Color.clear))
+                .fill(isSelected ? NavTheme.accentBlue.opacity(0.11) : (hovering ? Color.primary.opacity(0.035) : Color.clear))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(isSelected ? Color.accentColor.opacity(0.32) : Color.clear, lineWidth: 1)
+                .strokeBorder(isSelected ? NavTheme.accentBlue.opacity(0.32) : Color.clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
@@ -165,21 +136,5 @@ struct TaskRowView: View {
         task.checklistTotalCount > 0 ||
         !task.attachmentList.isEmpty ||
         !resolvedTags.isEmpty
-    }
-
-    private func dueFg(_ tone: DueTone) -> Color {
-        switch tone {
-        case .late: return Color(red: 0.84, green: 0.26, blue: 0.24)
-        case .soon: return Color(red: 0.78, green: 0.48, blue: 0.10)
-        case .normal: return .secondary
-        }
-    }
-
-    private func dueBg(_ tone: DueTone) -> Color {
-        switch tone {
-        case .late: return Color(red: 0.84, green: 0.26, blue: 0.24).opacity(0.12)
-        case .soon: return Color(red: 0.86, green: 0.56, blue: 0.12).opacity(0.13)
-        case .normal: return .clear
-        }
     }
 }

@@ -13,4 +13,4 @@ android/app/libs/*.jar
 android/local.properties
 
 # Legacy leftovers
-app/
+/app/

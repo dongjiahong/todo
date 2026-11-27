@@ -127,6 +127,27 @@ func (s *Store) LoadAll() (model.BoardState, error) {
 	}, nil
 }
 
+// GetTask fetches a single task by primary key without scanning the full table.
+func (s *Store) GetTask(id string) (model.Task, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var body string
+	err := s.db.QueryRow("SELECT body FROM tasks WHERE id = ?", id).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Task{}, false, nil
+	}
+	if err != nil {
+		return model.Task{}, false, err
+	}
+	var t model.Task
+	if err := json.Unmarshal([]byte(body), &t); err != nil {
+		return model.Task{}, false, err
+	}
+	t.Normalize()
+	return t, true, nil
+}
+
 func (s *Store) ChangesSince(since int64) ([]model.Task, []model.Tag, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

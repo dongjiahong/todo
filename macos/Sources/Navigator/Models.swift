@@ -47,13 +47,7 @@ enum TagHue: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var color: Color {
-        switch self {
-        case .blue: return Color(red: 0.20, green: 0.48, blue: 0.88)
-        case .green: return Color(red: 0.16, green: 0.62, blue: 0.42)
-        case .purple: return Color(red: 0.52, green: 0.36, blue: 0.84)
-        case .amber: return Color(red: 0.78, green: 0.50, blue: 0.12)
-        case .red: return Color(red: 0.84, green: 0.28, blue: 0.26)
-        }
+        NavTheme.tagColor(for: self)
     }
 
     var next: TagHue {
@@ -274,6 +268,43 @@ enum DateHelper {
             }
         }
         return urls
+    }
+
+    static func todaySubtitle() -> String {
+        let now = Date()
+        let cal = Calendar.current
+        let month = cal.component(.month, from: now)
+        let day = cal.component(.day, from: now)
+        let wds = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        let wd = wds[cal.component(.weekday, from: now) - 1]
+        return "\(month)月\(day)日 · \(wd)"
+    }
+
+    static func upcomingGroupTitle(for dueAt: String?) -> String {
+        guard let d = parseDue(dueAt) else { return "未定日期" }
+        let cal = Calendar.current
+        let now = Date()
+        let startOfToday = cal.startOfDay(for: now)
+        let startOfDue = cal.startOfDay(for: d)
+        let month = cal.component(.month, from: d)
+        let day = cal.component(.day, from: d)
+        let wds = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        let wd = wds[cal.component(.weekday, from: d) - 1]
+        if startOfDue < startOfToday {
+            return "已逾期"
+        }
+        if cal.isDateInToday(d) {
+            return "今天 · \(month)月\(day)日"
+        }
+        if cal.isDateInTomorrow(d) {
+            return "明天 · \(month)月\(day)日"
+        }
+        if let weekLater = cal.date(byAdding: .day, value: 7, to: startOfToday), startOfDue < weekLater {
+            return "\(wd) · \(month)月\(day)日"
+        }
+        let year = cal.component(.year, from: d)
+        let curYear = cal.component(.year, from: now)
+        return year == curYear ? "\(month)月\(day)日 · \(wd)" : "\(year)年\(month)月\(day)日"
     }
 }
 

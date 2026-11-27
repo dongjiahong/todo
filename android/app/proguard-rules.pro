@@ -1,0 +1,2 @@
+-keep class mobile.** { *; }
+-keep class go.** { *; }

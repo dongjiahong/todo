@@ -10,7 +10,7 @@ struct SidebarView: View {
                     SidebarRow(
                         title: "今天",
                         icon: "star.fill",
-                        tint: Color(red: 0.90, green: 0.62, blue: 0.14),
+                        tint: NavTheme.todayGold,
                         badge: store.attentionCount
                     )
                     .tag(NavSection.today)
@@ -18,7 +18,7 @@ struct SidebarView: View {
                     SidebarRow(
                         title: "进行中",
                         icon: "flame.fill",
-                        tint: Color(red: 0.20, green: 0.48, blue: 0.88),
+                        tint: NavTheme.doingBlue,
                         badge: store.doingCount
                     )
                     .tag(NavSection.doing)
@@ -26,7 +26,7 @@ struct SidebarView: View {
                     SidebarRow(
                         title: "待办",
                         icon: "tray.fill",
-                        tint: .secondary,
+                        tint: NavTheme.inboxBlue,
                         badge: store.todoCount
                     )
                     .tag(NavSection.todo)
@@ -34,7 +34,7 @@ struct SidebarView: View {
                     SidebarRow(
                         title: "计划",
                         icon: "calendar",
-                        tint: Color(red: 0.84, green: 0.28, blue: 0.26),
+                        tint: NavTheme.upcomingCoral,
                         badge: 0
                     )
                     .tag(NavSection.upcoming)
@@ -79,7 +79,7 @@ struct SidebarView: View {
                     SidebarRow(
                         title: "日志簿",
                         icon: "book.closed.fill",
-                        tint: Color(red: 0.16, green: 0.62, blue: 0.42),
+                        tint: NavTheme.logbookGreen,
                         badge: 0
                     )
                     .tag(NavSection.logbook)
@@ -129,9 +129,9 @@ struct SidebarView: View {
 
     private var syncDotColor: Color {
         if store.syncStatus.syncedAt > 0 {
-            return Color(red: 0.16, green: 0.62, blue: 0.42)
+            return NavTheme.logbookGreen
         }
-        return store.syncStatus.listening ? Color(red: 0.20, green: 0.48, blue: 0.88) : .gray
+        return store.syncStatus.listening ? NavTheme.accentBlue : .gray
     }
 
     private var syncStatusText: String {

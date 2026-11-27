@@ -123,9 +123,9 @@ struct SettingsView: View {
 
     private var notificationDotColor: Color {
         switch store.notificationState {
-        case .authorized: return Color(red: 0.16, green: 0.62, blue: 0.42)
-        case .denied: return Color(red: 0.84, green: 0.28, blue: 0.26)
-        case .unknown: return Color(red: 0.86, green: 0.56, blue: 0.12)
+        case .authorized: return NavTheme.logbookGreen
+        case .denied: return NavTheme.danger
+        case .unknown: return NavTheme.todayGold
         case .unsupported: return .gray
         }
     }
