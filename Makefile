@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help core core-macos core-android macos-bin macos macos-app run-macos \
+.PHONY: help version core core-macos core-android macos-bin macos macos-app run-macos \
         android android-debug android-release install-android release clean
 
 GO ?= /usr/local/go/bin/go
@@ -26,7 +26,27 @@ MAC_SDK := $(shell \
 help: ## 显示所有可用命令与说明
 	@printf "\n\033[1m领航 Navigator 构建与发版命令\033[0m\n\n"
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-	@printf "\n示例：\n  make macos-app\n  make android-debug\n  make release v=0.2.0\n\n"
+	@printf "\n示例：\n  make version\n  make macos-app\n  make android-release\n  make release v=0.2.0\n\n"
+
+version: ## 检查项目各端版本号与一致性
+	@ANDROID_VER=$$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android/app/build.gradle.kts | head -n 1); \
+	ANDROID_CODE=$$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' android/app/build.gradle.kts | head -n 1); \
+	MAC_UI_VER=$$(sed -n 's/.*LabeledContent("版本", value: "\([^ "]*\).*/\1/p' macos/Sources/Navigator/SettingsView.swift | head -n 1); \
+	MAC_APP_VER=$$(if [ -f build/$(APP_NAME).app/Contents/Info.plist ]; then /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/$(APP_NAME).app/Contents/Info.plist 2>/dev/null; else echo "未构建"; fi); \
+	GIT_TAG=$$(git describe --tags --abbrev=0 2>/dev/null || echo "无"); \
+	GIT_SHA=$$(git rev-parse --short HEAD 2>/dev/null || echo "unknown"); \
+	printf "\n\033[1mNavigator 版本检查\033[0m\n"; \
+	printf "  %-24s %s (build %s)\n" "Makefile:" "$(VERSION)" "$(BUILD_NUM)"; \
+	printf "  %-24s %s (code %s)\n" "Android (gradle):" "$${ANDROID_VER:-未知}" "$${ANDROID_CODE:-?}"; \
+	printf "  %-24s %s\n" "macOS (SettingsView):" "$${MAC_UI_VER:-未知}"; \
+	printf "  %-24s %s\n" "macOS App (Info.plist):" "$$MAC_APP_VER"; \
+	printf "  %-24s %s (%s)\n\n" "Git Tag / Commit:" "$$GIT_TAG" "$$GIT_SHA"; \
+	if [ "$(VERSION)" = "$$ANDROID_VER" ] && [ "$(VERSION)" = "$$MAC_UI_VER" ] && [ "$(BUILD_NUM)" = "$$ANDROID_CODE" ]; then \
+		printf "\033[32m✓ 各端版本号一致 ($(VERSION), build $(BUILD_NUM))\033[0m\n\n"; \
+	else \
+		printf "\033[31m✗ 检测到版本号或 build 号不一致，请检查同步\033[0m\n\n"; \
+		exit 1; \
+	fi
 
 core: core-macos core-android ## 同时编译 macOS 静态库与 Android AAR
 
@@ -71,20 +91,20 @@ android-debug: core-android ## 编译 Android Debug APK（可直接 adb 安装�
 
 android-release: core-android ## 编译 Android Release APK
 	cd android && $(GRADLE) assembleRelease
-	@echo "Built android/app/build/outputs/apk/release/"
+	@echo "Built android/app/build/outputs/apk/release/app-release.apk"
 
 android: android-release ## 编译 Android Release APK（android-release 别名）
 
-install-android: android-debug ## 编译并通过 adb 安装 Debug APK 到已连接手机
-	adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+install-android: android-release ## 编译并通过 adb 安装 Release APK 到已连接手机
+	adb install -r android/app/build/outputs/apk/release/app-release.apk
 
 release: ## 打包双端发版产物（用法：make release v=0.2.0）
 	@if [ -z "$(v)" ]; then echo "Usage: make release v=0.2.0"; exit 1; fi
 	$(MAKE) macos-app VERSION=$(v)
-	$(MAKE) android-debug
+	$(MAKE) android-release
 	mkdir -p build/release
 	hdiutil create -volname "$(APP_NAME)" -srcfolder build/$(APP_NAME).app -ov -format UDZO build/release/$(APP_NAME)-$(v)-macos-arm64.dmg
-	cp android/app/build/outputs/apk/debug/app-debug.apk build/release/$(APP_NAME)-$(v)-android-arm64.apk
+	cp android/app/build/outputs/apk/release/app-release.apk build/release/$(APP_NAME)-$(v)-android-arm64.apk
 	@echo ""
 	@echo "Release 产物已就绪：build/release/"
 	@ls -lh build/release/
