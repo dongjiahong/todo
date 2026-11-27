@@ -1,0 +1,16 @@
+# macOS & OS clutter
+.DS_Store
+
+# Build outputs & compiled native libraries
+build/
+macos/Lib/
+macos/.build/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/libs/*.aar
+android/app/libs/*.jar
+android/local.properties
+
+# Legacy leftovers
+app/

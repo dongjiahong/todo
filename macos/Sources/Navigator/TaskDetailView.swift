@@ -1,0 +1,417 @@
+import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// Non-blocking right-side Inspector panel.
+/// First-class structured subtasks + clean native Notes editor (zero dual-layer hacks).
+struct TaskDetailView: View {
+    let taskID: String
+    @Bindable var store: NavigatorStore
+
+    @State private var newSubtaskTitle: String = ""
+    @State private var showDuePopover: Bool = false
+    @State private var showImageImporter: Bool = false
+
+    private var task: TaskItem? {
+        store.liveTasks.first { $0.id == taskID }
+    }
+
+    var body: some View {
+        if let task {
+            VStack(spacing: 0) {
+                // Top action strip
+                HStack(spacing: 8) {
+                    Picker("", selection: Binding(
+                        get: { task.status },
+                        set: { store.moveTask(id: task.id, to: $0) }
+                    )) {
+                        ForEach(TaskStatus.allCases) { st in
+                            Text(st.label).tag(st)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 200)
+
+                    Spacer()
+
+                    Button {
+                        pasteImageFromClipboard(taskID: task.id)
+                    } label: {
+                        Image(systemName: "photo.badge.plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("粘贴剪贴板图片或选择图片")
+
+                    Button(role: .destructive) {
+                        store.deleteTask(id: task.id)
+                    } label: {
+                        Image(systemName: "trash")
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("删除任务（可撤销）")
+
+                    Button {
+                        store.selectedTaskID = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("关闭详情")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        // Title
+                        TextField(
+                            "要做什么？",
+                            text: Binding(
+                                get: { task.title },
+                                set: { val in
+                                    store.patchTask(id: task.id) { t, now in
+                                        t.title = val
+                                        t.stamps?["title"] = now
+                                    }
+                                }
+                            ),
+                            axis: .vertical
+                        )
+                        .font(.system(size: 19, weight: .semibold))
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...4)
+
+                        // Due & Repeat compact pill (opens bespoke DueDatePopover)
+                        HStack(spacing: 8) {
+                            Button {
+                                showDuePopover.toggle()
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "calendar")
+                                        .font(.system(size: 11.5))
+                                    Text(DateHelper.dueBadge(task.dueAt, settled: task.isDone)?.text ?? "设置截止时间")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .monospacedDigit()
+                                    if task.activeRepeat != .none {
+                                        Text("· \(task.activeRepeat.label)")
+                                            .font(.system(size: 11.5, weight: .medium))
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                            }
+                            .buttonStyle(.plain)
+                            .popover(isPresented: $showDuePopover, arrowEdge: .bottom) {
+                                DueDatePopover(
+                                    currentDue: task.dueAt,
+                                    currentRepeat: task.activeRepeat,
+                                    onApply: { newDue, newRepeat in
+                                        store.patchTask(id: task.id) { t, now in
+                                            t.dueAt = newDue
+                                            t.repeatRule = newDue == nil ? RepeatRule.none : newRepeat
+                                            t.stamps?["dueAt"] = now
+                                            t.stamps?["repeatRule"] = now
+                                        }
+                                    },
+                                    onDismiss: { showDuePopover = false }
+                                )
+                            }
+
+                            if task.dueAt != nil && store.notificationState != .authorized {
+                                Button {
+                                    if store.notificationState == .denied {
+                                        store.openSystemNotificationSettings()
+                                    } else {
+                                        store.requestNotificationPermission()
+                                    }
+                                } label: {
+                                    Label(
+                                        store.notificationState == .denied ? "通知被拒，去开启" : "开启到期通知",
+                                        systemImage: "bell.badge"
+                                    )
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(Color(red: 0.80, green: 0.48, blue: 0.10))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        // Tags row
+                        FlowLayout(spacing: 6) {
+                            ForEach(store.liveTags) { tag in
+                                let selected = task.tagIds.contains(tag.id)
+                                Button {
+                                    store.patchTask(id: task.id) { t, now in
+                                        if selected {
+                                            t.tagIds.removeAll { $0 == tag.id }
+                                        } else {
+                                            t.tagIds.append(tag.id)
+                                        }
+                                        t.stamps?["tagIds"] = now
+                                    }
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Circle().fill(tag.hue.color).frame(width: 6, height: 6)
+                                        Text(tag.label)
+                                            .font(.system(size: 11.5, weight: .medium))
+                                            .foregroundStyle(selected ? tag.hue.color : .secondary)
+                                    }
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(
+                                        Capsule()
+                                            .fill(selected ? tag.hue.color.opacity(0.14) : Color.primary.opacity(0.05))
+                                    )
+                                    .overlay(
+                                        Capsule()
+                                            .strokeBorder(selected ? tag.hue.color.opacity(0.45) : .clear, lineWidth: 1)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        Divider()
+
+                        // First-class Structured Subtasks Section
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("子任务")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                if task.checklistTotalCount > 0 {
+                                    Text("\(task.checklistDoneCount)/\(task.checklistTotalCount)")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.tertiary)
+                                        .monospacedDigit()
+                                }
+                                Spacer()
+                            }
+
+                            ForEach(task.subtasks) { sub in
+                                HStack(spacing: 8) {
+                                    Button {
+                                        store.toggleSubtask(taskID: task.id, subtaskID: sub.id)
+                                    } label: {
+                                        Image(systemName: sub.done ? "checkmark.square.fill" : "square")
+                                            .font(.system(size: 14))
+                                            .foregroundStyle(sub.done ? Color(red: 0.16, green: 0.62, blue: 0.42) : .secondary)
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    TextField(
+                                        "子任务内容",
+                                        text: Binding(
+                                            get: { sub.title },
+                                            set: { store.updateSubtaskTitle(taskID: task.id, subtaskID: sub.id, title: $0) }
+                                        )
+                                    )
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(sub.done ? .secondary : .primary)
+                                    .strikethrough(sub.done)
+
+                                    Button {
+                                        store.deleteSubtask(taskID: task.id, subtaskID: sub.id)
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.vertical, 2)
+                            }
+
+                            // Inline quick add subtask
+                            HStack(spacing: 8) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.tertiary)
+                                TextField("添加子任务，回车确认…", text: $newSubtaskTitle)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 13))
+                                    .onSubmit {
+                                        store.addSubtask(to: task.id, title: newSubtaskTitle)
+                                        newSubtaskTitle = ""
+                                    }
+                            }
+                            .padding(.top, 2)
+                        }
+
+                        Divider()
+
+                        // Clean Native Notes Section
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("备注")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+
+                            ZStack(alignment: .topLeading) {
+                                if task.notes.isEmpty {
+                                    Text("补充细节、背景或链接…")
+                                        .font(.system(size: 13.5))
+                                        .foregroundStyle(.tertiary)
+                                        .padding(.top, 5)
+                                        .padding(.leading, 4)
+                                }
+                                TextEditor(text: Binding(
+                                    get: { task.notes },
+                                    set: { val in
+                                        store.patchTask(id: task.id) { t, now in
+                                            t.notes = val
+                                            t.stamps?["notes"] = now
+                                        }
+                                    }
+                                ))
+                                .font(.system(size: 13.5))
+                                .scrollContentBackground(.hidden)
+                                .frame(minHeight: 140)
+                            }
+
+                            // Auto-detected clickable links
+                            let urls = DateHelper.extractURLs(from: task.notes)
+                            if !urls.isEmpty {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ForEach(urls, id: \.absoluteString) { url in
+                                        Link(destination: url) {
+                                            HStack(spacing: 5) {
+                                                Image(systemName: "link")
+                                                    .font(.system(size: 11))
+                                                Text(url.absoluteString)
+                                                    .font(.system(size: 12))
+                                                    .lineLimit(1)
+                                            }
+                                            .foregroundStyle(Color.accentColor)
+                                        }
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
+                        }
+
+                        // Attachments strip
+                        if !task.attachmentList.isEmpty {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("图片附件")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 10) {
+                                        ForEach(task.attachmentList, id: \.self) { name in
+                                            if let url = store.assetURL(for: name),
+                                               let nsImg = NSImage(contentsOf: url) {
+                                                ZStack(alignment: .topTrailing) {
+                                                    Image(nsImage: nsImg)
+                                                        .resizable()
+                                                        .scaledToFill()
+                                                        .frame(width: 72, height: 72)
+                                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                                        .onTapGesture {
+                                                            store.previewImagePath = url.path
+                                                        }
+
+                                                    Button {
+                                                        store.removeAttachment(from: task.id, name: name)
+                                                    } label: {
+                                                        Image(systemName: "xmark.circle.fill")
+                                                            .font(.system(size: 15))
+                                                            .foregroundStyle(.white, .black.opacity(0.6))
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .offset(x: 4, y: -4)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(18)
+                }
+            }
+            .fileImporter(
+                isPresented: $showImageImporter,
+                allowedContentTypes: [.image],
+                allowsMultipleSelection: false
+            ) { result in
+                if case .success(let urls) = result, let url = urls.first,
+                   let data = try? Data(contentsOf: url) {
+                    store.attachImage(to: task.id, data: data, ext: url.pathExtension.isEmpty ? "png" : url.pathExtension)
+                }
+            }
+        } else {
+            VStack(spacing: 8) {
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.tertiary)
+                Text("选择一张任务查看详情")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+
+
+    private func pasteImageFromClipboard(taskID: String) {
+        let pb = NSPasteboard.general
+        if let img = NSImage(pasteboard: pb),
+           let tiff = img.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            store.attachImage(to: taskID, data: png, ext: "png")
+        } else {
+            showImageImporter = true
+        }
+    }
+}
+
+/// Simple horizontal wrapping layout for tags.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxW = proposal.width ?? 300
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowH: CGFloat = 0
+        for sub in subviews {
+            let sz = sub.sizeThatFits(.unspecified)
+            if x + sz.width > maxW, x > 0 {
+                x = 0
+                y += rowH + spacing
+                rowH = 0
+            }
+            x += sz.width + spacing
+            rowH = max(rowH, sz.height)
+        }
+        return CGSize(width: maxW, height: y + rowH)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowH: CGFloat = 0
+        for sub in subviews {
+            let sz = sub.sizeThatFits(.unspecified)
+            if x + sz.width > bounds.maxX, x > bounds.minX {
+                x = bounds.minX
+                y += rowH + spacing
+                rowH = 0
+            }
+            sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sz))
+            x += sz.width + spacing
+            rowH = max(rowH, sz.height)
+        }
+    }
+}

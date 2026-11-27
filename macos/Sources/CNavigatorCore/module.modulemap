@@ -1,0 +1,4 @@
+module CNavigatorCore {
+    header "navigator_core.h"
+    export *
+}
