@@ -93,6 +93,7 @@ final class NavigatorStore {
 
     var undoBanner: UndoAction?
     private var undoTimer: Timer?
+    private var pendingSaves: [String: Task<Void, Never>] = [:]
 
     private let bridge = CoreBridge.shared
     private let notifications = NotificationManager.shared
@@ -271,7 +272,7 @@ final class NavigatorStore {
         return saved
     }
 
-    func patchTask(id: String, mutate: (inout TaskItem, Int64) -> Void) {
+    func patchTask(id: String, rescheduleNotifications: Bool = true, mutate: (inout TaskItem, Int64) -> Void) {
         guard var task = liveTasks.first(where: { $0.id == id }) else { return }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         if task.stamps == nil { task.stamps = [:] }
@@ -282,11 +283,31 @@ final class NavigatorStore {
             task.repeatRule = RepeatRule.none
             task.stamps?["repeatRule"] = now
         }
+        pendingSaves.removeValue(forKey: id)?.cancel()
         bridge.saveTask(task)
         if let idx = tasks.firstIndex(where: { $0.id == id }) {
             tasks[idx] = task
         }
-        refreshSystemChrome()
+        refreshSystemChrome(rescheduleNotifications: rescheduleNotifications)
+    }
+
+    func debouncedPatchTask(id: String, mutate: (inout TaskItem, Int64) -> Void) {
+        guard var task = liveTasks.first(where: { $0.id == id }) else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        if task.stamps == nil { task.stamps = [:] }
+        mutate(&task, now)
+        task.updatedAt = now
+        if let idx = tasks.firstIndex(where: { $0.id == id }) {
+            tasks[idx] = task
+        }
+        let snapshot = task
+        pendingSaves.removeValue(forKey: id)?.cancel()
+        pendingSaves[id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.bridge.saveTask(snapshot)
+            self.pendingSaves.removeValue(forKey: id)
+        }
     }
 
     func moveTask(id: String, to status: TaskStatus) {
@@ -305,13 +326,18 @@ final class NavigatorStore {
 
     func toggleComplete(id: String, forceDone: Bool? = nil) {
         guard let task = liveTasks.first(where: { $0.id == id }) else { return }
+        pendingSaves.removeValue(forKey: id)?.cancel()
         let nextDone = forceDone ?? !task.isDone
-        _ = bridge.completeTask(id: id, done: nextDone)
+        let saved = bridge.completeTask(id: id, done: nextDone)
+        let spawned = nextDone ? saved.first(where: { $0.id != id }) : nil
         reload()
         if nextDone {
             showUndo(message: "已完成「\(task.title.isEmpty ? "未命名任务" : task.title)」") { [weak self] in
                 guard let self else { return }
                 _ = self.bridge.completeTask(id: id, done: false)
+                if let spawned {
+                    self.bridge.deleteTask(id: spawned.id, deleted: true)
+                }
                 self.reload()
             }
         }
@@ -369,7 +395,7 @@ final class NavigatorStore {
     }
 
     func updateSubtaskTitle(taskID: String, subtaskID: String, title: String) {
-        patchTask(id: taskID) { t, now in
+        debouncedPatchTask(id: taskID) { t, now in
             if let idx = t.subtasks.firstIndex(where: { $0.id == subtaskID }) {
                 t.subtasks[idx].title = title
                 t.stamps?["subtasks"] = now
@@ -534,11 +560,13 @@ final class NavigatorStore {
         showUndo(message: "已发送测试通知，2 秒后送达") {}
     }
 
-    private func refreshSystemChrome() {
+    private func refreshSystemChrome(rescheduleNotifications: Bool = true) {
         let count = attentionCount
         NSApplication.shared.dockTile.badgeLabel = count == 0 ? nil : (count > 99 ? "99+" : "\(count)")
-        notifications.reschedule(tasks: liveTasks, leadMinutes: leadReminderMinutes)
-        refreshNotificationStatus()
+        if rescheduleNotifications {
+            notifications.reschedule(tasks: liveTasks, leadMinutes: leadReminderMinutes)
+            refreshNotificationStatus()
+        }
     }
 }
 

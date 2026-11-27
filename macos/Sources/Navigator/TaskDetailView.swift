@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -76,7 +77,7 @@ struct TaskDetailView: View {
                             text: Binding(
                                 get: { task.title },
                                 set: { val in
-                                    store.patchTask(id: task.id) { t, now in
+                                    store.debouncedPatchTask(id: task.id) { t, now in
                                         t.title = val
                                         t.stamps?["title"] = now
                                     }
@@ -267,7 +268,7 @@ struct TaskDetailView: View {
                                 TextEditor(text: Binding(
                                     get: { task.notes },
                                     set: { val in
-                                        store.patchTask(id: task.id) { t, now in
+                                        store.debouncedPatchTask(id: task.id) { t, now in
                                             t.notes = val
                                             t.stamps?["notes"] = now
                                         }
@@ -309,28 +310,12 @@ struct TaskDetailView: View {
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack(spacing: 10) {
                                         ForEach(task.attachmentList, id: \.self) { name in
-                                            if let url = store.assetURL(for: name),
-                                               let nsImg = NSImage(contentsOf: url) {
-                                                ZStack(alignment: .topTrailing) {
-                                                    Image(nsImage: nsImg)
-                                                        .resizable()
-                                                        .scaledToFill()
-                                                        .frame(width: 72, height: 72)
-                                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                                        .onTapGesture {
-                                                            store.previewImagePath = url.path
-                                                        }
-
-                                                    Button {
-                                                        store.removeAttachment(from: task.id, name: name)
-                                                    } label: {
-                                                        Image(systemName: "xmark.circle.fill")
-                                                            .font(.system(size: 15))
-                                                            .foregroundStyle(.white, .black.opacity(0.6))
-                                                    }
-                                                    .buttonStyle(.plain)
-                                                    .offset(x: 4, y: -4)
-                                                }
+                                            if let url = store.assetURL(for: name) {
+                                                AttachmentThumbView(
+                                                    url: url,
+                                                    onTap: { store.previewImagePath = url.path },
+                                                    onRemove: { store.removeAttachment(from: task.id, name: name) }
+                                                )
                                             }
                                         }
                                     }
@@ -379,7 +364,7 @@ struct TaskDetailView: View {
                 return event
             }
             let targetID = store.selectedTaskID ?? taskID
-            if pasteImageFromClipboard(taskID: targetID) {
+            if pasteImageFromClipboard(taskID: targetID, allowWhenTextPresent: false) {
                 return nil
             }
             return event
@@ -394,9 +379,21 @@ struct TaskDetailView: View {
     }
 
     @discardableResult
-    private func pasteImageFromClipboard(taskID: String) -> Bool {
+    private func pasteImageFromClipboard(taskID: String, allowWhenTextPresent: Bool = true) -> Bool {
         let pb = NSPasteboard.general
         let imageExts: Set<String> = ["png", "jpg", "jpeg", "webp", "heic", "gif", "tiff", "bmp"]
+
+        // When invoked via ⌘V while clipboard also contains plain text (e.g. rich copy from browser),
+        // let the focused text field handle normal text paste instead of hijacking it.
+        if !allowWhenTextPresent,
+           let str = pb.string(forType: .string),
+           !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let fileURLs = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+            let hasImageFiles = fileURLs.contains { imageExts.contains($0.pathExtension.lowercased()) }
+            if !hasImageFiles {
+                return false
+            }
+        }
 
         // 1. Direct image data (screenshots, browser "Copy Image", Snapzy, etc.)
         if let pngData = pb.data(forType: .png), !pngData.isEmpty {
@@ -464,6 +461,75 @@ struct FlowLayout: Layout {
             sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sz))
             x += sz.width + spacing
             rowH = max(rowH, sz.height)
+        }
+    }
+}
+
+private final class ThumbnailCache {
+    static let shared = ThumbnailCache()
+    private let cache = NSCache<NSString, NSImage>()
+
+    private init() {
+        cache.countLimit = 128
+    }
+
+    func thumbnail(for url: URL, maxPixelSize: Int = 180) -> NSImage? {
+        let key = url.path as NSString
+        if let hit = cache.object(forKey: key) {
+            return hit
+        }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary) else {
+            return nil
+        }
+        let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        cache.setObject(img, forKey: key)
+        return img
+    }
+}
+
+private struct AttachmentThumbView: View {
+    let url: URL
+    let onTap: () -> Void
+    let onRemove: () -> Void
+
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.primary.opacity(0.06))
+                }
+            }
+            .frame(width: 72, height: 72)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .onTapGesture(perform: onTap)
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white, .black.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+            .offset(x: 4, y: -4)
+        }
+        .task(id: url) {
+            let targetURL = url
+            let loaded = await Task.detached(priority: .utility) {
+                ThumbnailCache.shared.thumbnail(for: targetURL)
+            }.value
+            self.image = loaded
         }
     }
 }

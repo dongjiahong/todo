@@ -47,6 +47,7 @@ func Open(dataDir string) (*Engine, error) {
 	eng := &Engine{store: st, syncer: sy}
 	eng.seedIfFirstRun()
 	_, _ = st.SnapshotDaily()
+	go func() { _ = st.PruneOrphanAssets(24 * time.Hour) }()
 	return eng, nil
 }
 

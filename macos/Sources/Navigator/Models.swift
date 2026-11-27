@@ -242,22 +242,28 @@ enum DateHelper {
         return ("\(dayStr) \(timeStr)", .normal)
     }
 
+    private static let logbookFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "M月d日 EEEE"
+        return f
+    }()
+
+    private static let linkDetector: NSDataDetector? = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    )
+
     static func logbookGroupTitle(for ms: Int64?) -> String {
         guard let ms, ms > 0 else { return "更早" }
         let date = Date(timeIntervalSince1970: Double(ms) / 1000.0)
         let cal = Calendar.current
         if cal.isDateInToday(date) { return "今天" }
         if cal.isDateInYesterday(date) { return "昨天" }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "zh_CN")
-        f.dateFormat = "M月d日 EEEE"
-        return f.string(from: date)
+        return logbookFormatter.string(from: date)
     }
 
     static func extractURLs(from text: String) -> [URL] {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
-            return []
-        }
+        guard let detector = linkDetector, !text.isEmpty else { return [] }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         var seen = Set<String>()
         var urls: [URL] = []

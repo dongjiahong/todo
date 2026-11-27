@@ -421,3 +421,50 @@ func (s *Store) pruneBackupsLocked(keep int) {
 		_ = os.Remove(filepath.Join(s.backupDir, names[i]))
 	}
 }
+
+// PruneOrphanAssets removes unreferenced files in assets/ older than minAge
+// (keeping a grace window so Undo and in-flight LAN sync stay safe).
+func (s *Store) PruneOrphanAssets(minAge time.Duration) int {
+	if s.assetsDir == "" {
+		return 0
+	}
+	state, err := s.LoadAll()
+	if err != nil {
+		return 0
+	}
+	referenced := make(map[string]struct{})
+	for _, t := range state.Tasks {
+		if t.Deleted {
+			continue
+		}
+		for _, name := range t.Attachments {
+			if name != "" {
+				referenced[name] = struct{}{}
+			}
+		}
+	}
+	entries, err := os.ReadDir(s.assetsDir)
+	if err != nil {
+		return 0
+	}
+	cutoff := time.Now().Add(-minAge)
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if _, ok := referenced[e.Name()]; ok {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if os.Remove(filepath.Join(s.assetsDir, e.Name())) == nil {
+				removed++
+			}
+		}
+	}
+	return removed
+}
