@@ -379,8 +379,6 @@ func (e *Engine) seedIfFirstRun() {
 		return
 	}
 	now := time.Now().UnixMilli()
-	today := time.Now().Format("2006-01-02")
-	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
 
 	tags := []model.Tag{
 		{ID: "work", Label: "工作", Hue: model.HueBlue, Order: 0, UpdatedAt: now},
@@ -390,49 +388,7 @@ func (e *Engine) seedIfFirstRun() {
 		{ID: "urgent", Label: "紧急", Hue: model.HueRed, Order: 4, UpdatedAt: now},
 	}
 
-	tasks := []model.Task{
-		{
-			ID:     "welcome-1",
-			Title:  "整理本周核心目标与待办",
-			Notes:  "打开右侧详情即可管理子任务和备注，已完成事项会自动进入左侧日志簿。",
-			Status: model.StatusDoing,
-			Subtasks: []model.Subtask{
-				{ID: "ws-1", Title: "确认本周三项关键交付", Done: true, Order: 0},
-				{ID: "ws-2", Title: "清理过期与不再需要的任务", Done: false, Order: 1},
-				{ID: "ws-3", Title: "在 Android 端输入 6 位配对码完成局域网同步", Done: false, Order: 2},
-			},
-			TagIDs:    []string{"work"},
-			DueAt:     today + "T18:00",
-			Rank:      1000,
-			CreatedAt: now,
-			UpdatedAt: now,
-		},
-		{
-			ID:         "welcome-2",
-			Title:      "晚间复盘 15 分钟",
-			Notes:      "记录今天推进最顺的一件事与明天第一步。",
-			Status:     model.StatusTodo,
-			TagIDs:     []string{"personal"},
-			DueAt:      today + "T21:30",
-			RepeatRule: model.RepeatDaily,
-			Rank:       2000,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		},
-		{
-			ID:        "welcome-3",
-			Title:     "阅读技术文章并整理笔记",
-			Notes:     "可直接粘贴链接，下方会自动识别可点击跳转。",
-			Status:    model.StatusTodo,
-			TagIDs:    []string{"study"},
-			DueAt:     tomorrow + "T20:00",
-			Rank:      3000,
-			CreatedAt: now,
-			UpdatedAt: now,
-		},
-	}
-
-	_, _, _ = e.store.Upsert(tasks, tags)
+	_, _, _ = e.store.Upsert(nil, tags)
 }
 
 func newID(prefix string) string {
