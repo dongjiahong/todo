@@ -11,6 +11,7 @@ struct TaskDetailView: View {
     @State private var newSubtaskTitle: String = ""
     @State private var showDuePopover: Bool = false
     @State private var showImageImporter: Bool = false
+    @State private var keyMonitor: Any?
 
     private var task: TaskItem? {
         store.liveTasks.first { $0.id == taskID }
@@ -35,12 +36,14 @@ struct TaskDetailView: View {
                     Spacer()
 
                     Button {
-                        pasteImageFromClipboard(taskID: task.id)
+                        if !pasteImageFromClipboard(taskID: task.id) {
+                            showImageImporter = true
+                        }
                     } label: {
                         Image(systemName: "photo.badge.plus")
                     }
                     .buttonStyle(.borderless)
-                    .help("粘贴剪贴板图片或选择图片")
+                    .help("粘贴剪贴板图片 (⌘V) 或选择图片")
 
                     Button(role: .destructive) {
                         store.deleteTask(id: task.id)
@@ -348,6 +351,12 @@ struct TaskDetailView: View {
                     store.attachImage(to: task.id, data: data, ext: url.pathExtension.isEmpty ? "png" : url.pathExtension)
                 }
             }
+            .onAppear {
+                installPasteMonitor()
+            }
+            .onDisappear {
+                removePasteMonitor()
+            }
         } else {
             VStack(spacing: 8) {
                 Image(systemName: "sidebar.right")
@@ -361,18 +370,61 @@ struct TaskDetailView: View {
         }
     }
 
+    private func installPasteMonitor() {
+        removePasteMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard flags == .command,
+                  event.charactersIgnoringModifiers?.lowercased() == "v" else {
+                return event
+            }
+            let targetID = store.selectedTaskID ?? taskID
+            if pasteImageFromClipboard(taskID: targetID) {
+                return nil
+            }
+            return event
+        }
+    }
 
+    private func removePasteMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
 
-    private func pasteImageFromClipboard(taskID: String) {
+    @discardableResult
+    private func pasteImageFromClipboard(taskID: String) -> Bool {
         let pb = NSPasteboard.general
-        if let img = NSImage(pasteboard: pb),
-           let tiff = img.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiff),
+        let imageExts: Set<String> = ["png", "jpg", "jpeg", "webp", "heic", "gif", "tiff", "bmp"]
+
+        // 1. Direct image data (screenshots, browser "Copy Image", Snapzy, etc.)
+        if let pngData = pb.data(forType: .png), !pngData.isEmpty {
+            store.attachImage(to: taskID, data: pngData, ext: "png")
+            return true
+        }
+        if let tiffData = pb.data(forType: .tiff),
+           let rep = NSBitmapImageRep(data: tiffData),
            let png = rep.representation(using: .png, properties: [:]) {
             store.attachImage(to: taskID, data: png, ext: "png")
-        } else {
-            showImageImporter = true
+            return true
         }
+
+        // 2. Copied image file URL(s) from Finder
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            let imgURLs = urls.filter { imageExts.contains($0.pathExtension.lowercased()) }
+            if !imgURLs.isEmpty {
+                for url in imgURLs {
+                    if let data = try? Data(contentsOf: url), !data.isEmpty {
+                        let ext = url.pathExtension.isEmpty ? "png" : url.pathExtension.lowercased()
+                        store.attachImage(to: taskID, data: data, ext: ext)
+                    }
+                }
+                return true
+            }
+        }
+
+        return false
     }
 }
 

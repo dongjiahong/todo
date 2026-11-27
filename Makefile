@@ -24,7 +24,7 @@ MAC_SDK := $(shell \
 	xcrun --show-sdk-path)
 
 help: ## 显示所有可用命令与说明
-	@printf "\n\033[1m领航 Navigator 构建与发版命令\033[0m\n\n"
+	@printf "\n\033[1m$(APP_NAME) 构建与发版命令\033[0m\n\n"
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@printf "\n示例：\n  make version\n  make macos-app\n  make android-release\n  make release v=0.2.0\n\n"
 
@@ -35,7 +35,7 @@ version: ## 检查项目各端版本号与一致性
 	MAC_APP_VER=$$(if [ -f build/$(APP_NAME).app/Contents/Info.plist ]; then /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/$(APP_NAME).app/Contents/Info.plist 2>/dev/null; else echo "未构建"; fi); \
 	GIT_TAG=$$(git describe --tags --abbrev=0 2>/dev/null || echo "无"); \
 	GIT_SHA=$$(git rev-parse --short HEAD 2>/dev/null || echo "unknown"); \
-	printf "\n\033[1mNavigator 版本检查\033[0m\n"; \
+	printf "\n\033[1m$(APP_NAME) 版本检查\033[0m\n"; \
 	printf "  %-24s %s (build %s)\n" "Makefile:" "$(VERSION)" "$(BUILD_NUM)"; \
 	printf "  %-24s %s (code %s)\n" "Android (gradle):" "$${ANDROID_VER:-未知}" "$${ANDROID_CODE:-?}"; \
 	printf "  %-24s %s\n" "macOS (SettingsView):" "$${MAC_UI_VER:-未知}"; \
@@ -98,8 +98,9 @@ android: android-release ## 编译 Android Release APK（android-release 别名�
 install-android: android-release ## 编译并通过 adb 安装 Release APK 到已连接手机
 	adb install -r android/app/build/outputs/apk/release/app-release.apk
 
-release: ## 打包双端发版产物（用法：make release v=0.2.0）
+release: ## 打包双端发版产物并自动打 Tag 上传 GitHub Release（用法：make release v=0.2.0）
 	@if [ -z "$(v)" ]; then echo "Usage: make release v=0.2.0"; exit 1; fi
+	@command -v gh >/dev/null 2>&1 || { echo "Error: 未安装 gh CLI，请先执行 brew install gh && gh auth login"; exit 1; }
 	$(MAKE) macos-app VERSION=$(v)
 	$(MAKE) android-release
 	mkdir -p build/release
@@ -109,9 +110,22 @@ release: ## 打包双端发版产物（用法：make release v=0.2.0）
 	@echo "Release 产物已就绪：build/release/"
 	@ls -lh build/release/
 	@echo ""
-	@echo "如需发布 GitHub Release，可执行："
-	@echo "  git tag v$(v) && git push origin v$(v)"
-	@echo "  gh release create v$(v) build/release/$(APP_NAME)-$(v)-macos-arm64.dmg build/release/$(APP_NAME)-$(v)-android-arm64.apk --title \"Navigator v$(v)\""
+	@echo "正在推送 Tag v$(v) 并上传至 GitHub Release..."
+	@if ! git rev-parse "v$(v)" >/dev/null 2>&1; then git tag "v$(v)"; fi
+	git push origin "v$(v)"
+	@if gh release view "v$(v)" >/dev/null 2>&1; then \
+		gh release upload "v$(v)" \
+			"build/release/$(APP_NAME)-$(v)-macos-arm64.dmg" \
+			"build/release/$(APP_NAME)-$(v)-android-arm64.apk" \
+			--clobber; \
+	else \
+		gh release create "v$(v)" \
+			"build/release/$(APP_NAME)-$(v)-macos-arm64.dmg" \
+			"build/release/$(APP_NAME)-$(v)-android-arm64.apk" \
+			--title "$(APP_NAME) v$(v)" \
+			--generate-notes; \
+	fi
+	@echo "✓ GitHub Release $(APP_NAME) v$(v) 发布完成"
 
 clean: ## 清理所有编译产物与缓存
 	rm -rf build $(MAC_LIB_DIR) macos/.build android/app/build
