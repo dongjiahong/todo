@@ -697,17 +697,30 @@ final class NavigatorStore {
     }
 
     func requestNotificationPermission() {
-        notifications.requestPermission { [weak self] state in
+        NSApp.activate(ignoringOtherApps: true)
+        notifications.requestPermission { [weak self] state, shouldOpenSettings in
             Task { @MainActor [weak self] in
-                self?.notificationState = state
-                self?.refreshSystemChrome()
+                guard let self else { return }
+                self.notificationState = state
+                self.refreshSystemChrome()
+                if shouldOpenSettings {
+                    self.openSystemNotificationSettings()
+                }
             }
         }
     }
 
     func openSystemNotificationSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
-            NSWorkspace.shared.open(url)
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.lele.todo"
+        let candidates = [
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)",
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.notifications"
+        ]
+        for raw in candidates {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                return
+            }
         }
     }
 
@@ -774,13 +787,17 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    func requestPermission(completion: @escaping (NotificationPermissionState) -> Void) {
+    func requestPermission(completion: @escaping (NotificationPermissionState, Bool) -> Void) {
         guard Bundle.main.bundleIdentifier != nil else {
-            completion(.unsupported)
+            completion(.unsupported, true)
             return
         }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-            completion(granted ? .authorized : .denied)
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if granted {
+                completion(.authorized, false)
+            } else {
+                completion(error != nil ? .unknown : .denied, true)
+            }
         }
     }
 

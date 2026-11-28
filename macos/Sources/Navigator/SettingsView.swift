@@ -68,21 +68,22 @@ struct SettingsView: View {
                     }
                     Spacer()
 
-                    if store.notificationState == .unknown {
-                        Button("请求授权") {
-                            store.requestNotificationPermission()
+                    HStack(spacing: 6) {
+                        if store.notificationState == .unknown {
+                            Button("请求授权") {
+                                store.requestNotificationPermission()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        } else if store.notificationState == .authorized {
+                            Button("发送测试") {
+                                store.sendTestNotification()
+                            }
+                            .controlSize(.small)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    } else if store.notificationState == .denied {
+
                         Button("系统设置") {
                             store.openSystemNotificationSettings()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    } else if store.notificationState == .authorized {
-                        Button("发送测试") {
-                            store.sendTestNotification()
                         }
                         .controlSize(.small)
                     }

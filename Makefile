@@ -75,11 +75,12 @@ icons: ## 从源图生成 macOS .icns 与 Android mipmap 图标（默认根目�
 
 macos: core-macos macos-bin ## 编译 Go Core + macOS SwiftUI 二进制
 
-macos-app: macos ## 打包 macOS build/TODO.app（含 AppIcon.icns）
+macos-app: macos ## 打包 macOS build/TODO.app（含 AppIcon.icns 与 ad-hoc 签名）
 	mkdir -p build/$(APP_NAME).app/Contents/MacOS build/$(APP_NAME).app/Contents/Resources
 	cp build/bin/$(APP_NAME) build/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)
 	if [ -f macos/Resources/AppIcon.icns ]; then cp macos/Resources/AppIcon.icns build/$(APP_NAME).app/Contents/Resources/AppIcon.icns; fi
 	printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>CFBundleExecutable</key><string>$(APP_NAME)</string>\n<key>CFBundleIdentifier</key><string>com.lele.todo</string>\n<key>CFBundleName</key><string>TODO</string>\n<key>CFBundleDisplayName</key><string>TODO</string>\n<key>CFBundleIconFile</key><string>AppIcon</string>\n<key>CFBundlePackageType</key><string>APPL</string>\n<key>CFBundleShortVersionString</key><string>$(VERSION)</string>\n<key>CFBundleVersion</key><string>$(BUILD_NUM)</string>\n<key>LSMinimumSystemVersion</key><string>14.0</string>\n<key>NSHighResolutionCapable</key><true/>\n</dict></plist>\n' > build/$(APP_NAME).app/Contents/Info.plist
+	codesign --force --deep --sign - build/$(APP_NAME).app
 	@echo "Built build/$(APP_NAME).app"
 
 run-macos: macos-app ## 编译并启动 macOS Navigator.app
@@ -104,7 +105,12 @@ release: ## 打包双端发版产物并自动打 Tag 上传 GitHub Release（用
 	$(MAKE) macos-app VERSION=$(v)
 	$(MAKE) android-release
 	mkdir -p build/release
-	hdiutil create -volname "$(APP_NAME)" -srcfolder build/$(APP_NAME).app -ov -format UDZO build/release/$(APP_NAME)-$(v)-macos-arm64.dmg
+	rm -rf build/dmg-staging
+	mkdir -p build/dmg-staging
+	cp -R build/$(APP_NAME).app build/dmg-staging/
+	ln -s /Applications build/dmg-staging/Applications
+	hdiutil create -volname "$(APP_NAME)" -srcfolder build/dmg-staging -ov -format UDZO build/release/$(APP_NAME)-$(v)-macos-arm64.dmg
+	rm -rf build/dmg-staging
 	cp android/app/build/outputs/apk/release/app-release.apk build/release/$(APP_NAME)-$(v)-android-arm64.apk
 	@echo ""
 	@echo "Release 产物已就绪：build/release/"
