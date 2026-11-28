@@ -38,15 +38,17 @@ type peerEntry struct {
 }
 
 type exchangeReq struct {
-	Tasks []model.Task `json:"tasks"`
-	Tags  []model.Tag  `json:"tags"`
-	Since int64        `json:"since"`
+	Tasks []model.Task     `json:"tasks"`
+	Tags  []model.Tag      `json:"tags"`
+	Lists []model.TaskList `json:"lists,omitempty"`
+	Since int64            `json:"since"`
 }
 
 type exchangeResp struct {
-	Tasks []model.Task `json:"tasks"`
-	Tags  []model.Tag  `json:"tags"`
-	At    int64        `json:"at"`
+	Tasks []model.Task     `json:"tasks"`
+	Tags  []model.Tag      `json:"tags"`
+	Lists []model.TaskList `json:"lists,omitempty"`
+	At    int64            `json:"at"`
 }
 
 // Syncer runs the LAN HTTP server (on macOS/desktop) and active event-driven peer exchange loop.
@@ -344,13 +346,13 @@ func (s *Syncer) handleState(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-		tasks, tags, at, err := s.store.ChangesSince(since)
+		tasks, tags, lists, at, err := s.store.ChangesSince(since)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(exchangeResp{Tasks: tasks, Tags: tags, At: at})
+		_ = json.NewEncoder(w).Encode(exchangeResp{Tasks: tasks, Tags: tags, Lists: lists, At: at})
 
 	case http.MethodPost:
 		var req exchangeReq
@@ -358,25 +360,25 @@ func (s *Syncer) handleState(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		mergedTasks, mergedTags, err := s.store.Upsert(req.Tasks, req.Tags)
+		mergedTasks, mergedTags, mergedLists, err := s.store.Upsert(req.Tasks, req.Tags, req.Lists)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		tasks, tags, at, err := s.store.ChangesSince(req.Since)
+		tasks, tags, lists, at, err := s.store.ChangesSince(req.Since)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if len(mergedTasks) > 0 || len(mergedTags) > 0 {
+		if len(mergedTasks) > 0 || len(mergedTags) > 0 || len(mergedLists) > 0 {
 			s.mu.Lock()
 			s.syncedAt = time.Now().UnixMilli()
 			s.mu.Unlock()
-			s.emit(model.SyncEvent{Type: "rows", Tasks: mergedTasks, Tags: mergedTags, At: at})
+			s.emit(model.SyncEvent{Type: "rows", Tasks: mergedTasks, Tags: mergedTags, Lists: mergedLists, At: at})
 			s.emitStatus()
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(exchangeResp{Tasks: tasks, Tags: tags, At: at})
+		_ = json.NewEncoder(w).Encode(exchangeResp{Tasks: tasks, Tags: tags, Lists: lists, At: at})
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -571,7 +573,7 @@ func (s *Syncer) exchangeLoop() {
 }
 
 func (s *Syncer) syncWithPeer(client *http.Client, peer *peerEntry, code string, since int64) bool {
-	tasks, tags, _, err := s.store.ChangesSince(since)
+	tasks, tags, lists, _, err := s.store.ChangesSince(since)
 	if err != nil {
 		return false
 	}
@@ -580,7 +582,7 @@ func (s *Syncer) syncWithPeer(client *http.Client, peer *peerEntry, code string,
 		s.markLost(peer)
 		return false
 	}
-	body, _ := json.Marshal(exchangeReq{Tasks: tasks, Tags: tags, Since: since})
+	body, _ := json.Marshal(exchangeReq{Tasks: tasks, Tags: tags, Lists: lists, Since: since})
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s/state", peer.addr), bytes.NewReader(body))
 	if err != nil {
 		return false
@@ -627,7 +629,7 @@ func (s *Syncer) syncWithPeer(client *http.Client, peer *peerEntry, code string,
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
 		return false
 	}
-	mergedTasks, mergedTags, err := s.store.Upsert(reply.Tasks, reply.Tags)
+	mergedTasks, mergedTags, mergedLists, err := s.store.Upsert(reply.Tasks, reply.Tags, reply.Lists)
 	if err != nil {
 		return false
 	}
@@ -647,8 +649,8 @@ func (s *Syncer) syncWithPeer(client *http.Client, peer *peerEntry, code string,
 	s.syncedAt = now
 	s.mu.Unlock()
 
-	if len(mergedTasks) > 0 || len(mergedTags) > 0 {
-		s.emit(model.SyncEvent{Type: "rows", Tasks: mergedTasks, Tags: mergedTags, At: reply.At})
+	if len(mergedTasks) > 0 || len(mergedTags) > 0 || len(mergedLists) > 0 {
+		s.emit(model.SyncEvent{Type: "rows", Tasks: mergedTasks, Tags: mergedTags, Lists: mergedLists, At: reply.At})
 	}
 	s.emitStatus()
 	return true

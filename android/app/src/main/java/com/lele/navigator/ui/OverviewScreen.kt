@@ -1,8 +1,9 @@
 package com.lele.navigator.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
@@ -10,9 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -20,22 +19,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import com.lele.navigator.model.TagColors
-import com.lele.navigator.notify.ReminderScheduler
+import com.lele.navigator.model.DateUtils
+import com.lele.navigator.model.ListStyle
+import com.lele.navigator.model.TaskListItem
+import com.lele.navigator.ui.components.ThingsCheckbox
 import com.lele.navigator.ui.components.ThingsDivider
 import com.lele.navigator.ui.theme.ThingsTheme
 
-/**
- * Things 3-style Lists Overview Hub.
- */
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun OverviewScreen(
     state: NavigatorUiState,
@@ -43,35 +39,16 @@ fun OverviewScreen(
     quickQuery: String,
     onQuickQueryChange: (String) -> Unit,
     onNavigate: (NavRoute) -> Unit,
-    onOpenTask: (String) -> Unit,
+    onOpenInspector: (String) -> Unit,
+    onNewReminder: () -> Unit,
+    onAddList: () -> Unit,
+    onEditList: (TaskListItem) -> Unit,
     onOpenSync: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenTagManager: () -> Unit
 ) {
     val c = ThingsTheme.colors
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var notifGranted by remember { mutableStateOf(ReminderScheduler.hasNotificationPermission(context)) }
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                notifGranted = ReminderScheduler.hasNotificationPermission(context)
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    val searchMatches = remember(state.liveTasks, state.liveTags, quickQuery) {
-        val q = quickQuery.trim().lowercase()
-        if (q.isEmpty()) emptyList()
-        else state.liveTasks.filter { t ->
-            t.title.lowercase().contains(q) ||
-                t.notes.lowercase().contains(q) ||
-                t.subtasks.any { it.title.lowercase().contains(q) } ||
-                t.tagIds.any { tid -> state.liveTags.firstOrNull { it.id == tid }?.label?.lowercase()?.contains(q) == true }
-        }
-    }
+    val searching = quickQuery.isNotBlank()
 
     Column(
         modifier = Modifier
@@ -79,160 +56,326 @@ fun OverviewScreen(
             .background(c.hubBackground)
             .statusBarsPadding()
     ) {
-        // Quick Find Bar (Things 3 style)
-        Box(
+        // Compact Top Utility Bar
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .padding(horizontal = 14.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (c.isDark) c.cardSurface else Color(0xFFE7E9EE))
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onOpenSync)
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
+            ) {
+                Box(
+                    Modifier
+                        .size(6.5.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                state.syncStatus.syncedAt > 0 -> c.logbookGreen
+                                state.syncStatus.pair == "wrong" || state.syncStatus.pair == "locked" -> c.danger
+                                else -> c.accentBlue
+                            }
+                        )
+                )
+                Text(
+                    text = if (state.syncStatus.syncedAt > 0) "已同步" else "局域网同步",
+                    fontSize = 12.sp,
+                    color = c.inkSecondary,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            IconButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.size(30.dp)
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Search,
-                    contentDescription = null,
-                    tint = c.inkTertiary,
-                    modifier = Modifier.size(18.dp)
+                    imageVector = Icons.Rounded.MoreHoriz,
+                    contentDescription = "设置",
+                    tint = c.accentBlue,
+                    modifier = Modifier.size(20.dp)
                 )
-                Spacer(Modifier.width(8.dp))
-                BasicTextField(
-                    value = quickQuery,
-                    onValueChange = onQuickQueryChange,
-                    singleLine = true,
-                    textStyle = TextStyle(color = c.inkPrimary, fontSize = 15.sp),
-                    cursorBrush = SolidColor(c.accentBlue),
-                    modifier = Modifier.weight(1f),
-                    decorationBox = { inner ->
-                        if (quickQuery.isEmpty()) {
-                            Text("快速查找标题、备注、子任务或标签", color = c.inkTertiary, fontSize = 15.sp)
-                        }
-                        inner()
-                    }
-                )
-                if (quickQuery.isNotEmpty()) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = "清除",
-                        tint = c.inkTertiary,
-                        modifier = Modifier
-                            .size(18.dp)
-                            .clickable { onQuickQueryChange("") }
-                    )
-                }
             }
         }
 
-        if (quickQuery.isNotBlank()) {
-            LazyColumn(
+        // Compact Search Bar
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 3.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (c.isDark) c.cardSurface else Color(0xFFE3E3E8))
+                .padding(horizontal = 10.dp, vertical = 7.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Search,
+                contentDescription = null,
+                tint = c.inkSecondary,
+                modifier = Modifier.size(16.dp)
+            )
+            BasicTextField(
+                value = quickQuery,
+                onValueChange = onQuickQueryChange,
+                singleLine = true,
+                textStyle = TextStyle(color = c.inkPrimary, fontSize = 14.sp),
+                cursorBrush = SolidColor(c.accentBlue),
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
-            ) {
-                if (searchMatches.isEmpty()) {
-                    item {
+                decorationBox = { inner ->
+                    if (quickQuery.isEmpty()) {
+                        Text("搜索", color = c.inkSecondary, fontSize = 14.sp)
+                    }
+                    inner()
+                }
+            )
+            if (searching) {
+                Icon(
+                    imageVector = Icons.Rounded.Cancel,
+                    contentDescription = "清空",
+                    tint = c.inkTertiary,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { onQuickQueryChange("") }
+                )
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            if (searching) {
+                val results = state.liveTasks.filter { state.matchesSearch(it, quickQuery) }
+                item {
+                    if (results.isEmpty()) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(top = 48.dp),
+                                .padding(top = 40.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("没有匹配的任务", color = c.inkTertiary, fontSize = 14.sp)
+                            Text("没有找到匹配「$quickQuery」的提醒事项", color = c.inkTertiary, fontSize = 13.sp)
                         }
-                    }
-                } else {
-                    item {
-                        Surface(
-                            shape = RoundedCornerShape(15.dp),
-                            color = c.cardSurface,
-                            modifier = Modifier.fillMaxWidth()
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(c.cardSurface)
                         ) {
-                            Column {
-                                searchMatches.forEachIndexed { idx, task ->
-                                    ThingsTaskRowContent(
-                                        task = task,
-                                        tags = state.liveTags,
-                                        showDoingBadge = true,
-                                        onToggleComplete = { vm.toggleComplete(task.id) },
-                                        onOpen = { onOpenTask(task.id) }
+                            results.forEachIndexed { idx, task ->
+                                val list = state.listFor(task.effectiveListId)
+                                val tint = ListStyle.colorFor(list.color)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onOpenInspector(task.id) }
+                                        .padding(horizontal = 6.dp, vertical = 6.dp)
+                                ) {
+                                    ThingsCheckbox(
+                                        checked = task.isDone,
+                                        tint = tint,
+                                        onCheckedChange = { vm.toggleComplete(task.id) }
                                     )
-                                    if (idx < searchMatches.lastIndex) {
-                                        ThingsDivider(insetStart = 54.dp)
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            text = task.title.ifBlank { "未命名提醒" },
+                                            fontSize = 14.sp,
+                                            color = if (task.isDone) c.inkSecondary else c.inkPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(text = list.name, fontSize = 11.5.sp, color = tint)
                                     }
+                                    Icon(
+                                        imageVector = Icons.Rounded.Info,
+                                        contentDescription = "详情",
+                                        tint = c.todayGold,
+                                        modifier = Modifier
+                                            .padding(end = 6.dp)
+                                            .size(18.dp)
+                                    )
+                                }
+                                if (idx < results.lastIndex) {
+                                    ThingsDivider(insetStart = 38.dp)
                                 }
                             }
                         }
                     }
                 }
-                item { Spacer(Modifier.height(96.dp)) }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
+            } else {
+                // Compact 2-Column Smart List Grid
                 item {
-                    val todayCount = state.todayActiveTasks.size + state.overdueTasks.size
-                    val overdueCount = state.overdueTasks.size
-                    OverviewCard {
-                        OverviewRow(
-                            title = "今天",
-                            icon = Icons.Rounded.Star,
-                            iconTint = c.todayGold,
-                            count = todayCount,
-                            alertCount = overdueCount,
-                            onClick = { onNavigate(NavRoute.Today) }
-                        )
-                        ThingsDivider(insetStart = 50.dp)
-                        OverviewRow(
-                            title = "进行中",
-                            icon = Icons.Rounded.Whatshot,
-                            iconTint = c.doingBlue,
-                            count = state.doingTasks.size,
-                            onClick = { onNavigate(NavRoute.Doing) }
-                        )
-                        ThingsDivider(insetStart = 50.dp)
-                        OverviewRow(
-                            title = "待办",
-                            icon = Icons.Rounded.Inbox,
-                            iconTint = c.inboxBlue,
-                            count = state.todoTasks.size,
-                            onClick = { onNavigate(NavRoute.Todo) }
-                        )
-                        ThingsDivider(insetStart = 50.dp)
-                        OverviewRow(
-                            title = "计划",
-                            icon = Icons.Rounded.CalendarMonth,
-                            iconTint = c.upcomingCoral,
-                            count = state.upcomingTasks.size,
-                            onClick = { onNavigate(NavRoute.Upcoming) }
-                        )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SmartGridCard(
+                                title = "今天",
+                                count = state.todayTasks.size,
+                                tint = c.accentBlue,
+                                badgeText = "${DateUtils.todayDayNumber()}",
+                                icon = Icons.Rounded.CalendarToday,
+                                modifier = Modifier.weight(1f),
+                                onClick = { onNavigate(NavRoute.Today) }
+                            )
+                            SmartGridCard(
+                                title = "计划",
+                                count = state.scheduledTasks.size,
+                                tint = c.upcomingCoral,
+                                icon = Icons.Rounded.DateRange,
+                                modifier = Modifier.weight(1f),
+                                onClick = { onNavigate(NavRoute.Scheduled) }
+                            )
+                        }
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SmartGridCard(
+                                title = "全部",
+                                count = state.allActiveTasks.size,
+                                tint = c.allDark,
+                                icon = Icons.Rounded.Inbox,
+                                modifier = Modifier.weight(1f),
+                                onClick = { onNavigate(NavRoute.All) }
+                            )
+                            SmartGridCard(
+                                title = "旗标",
+                                count = state.flaggedTasks.size,
+                                tint = c.todayGold,
+                                icon = Icons.Rounded.Flag,
+                                modifier = Modifier.weight(1f),
+                                onClick = { onNavigate(NavRoute.Flagged) }
+                            )
+                        }
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SmartGridCard(
+                                title = "完成",
+                                count = null,
+                                tint = c.completedGray,
+                                icon = Icons.Rounded.Check,
+                                modifier = Modifier.weight(1f),
+                                onClick = { onNavigate(NavRoute.Completed) }
+                            )
+                            Spacer(Modifier.weight(1f))
+                        }
                     }
                 }
 
+                // Compact 我的列表
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "我的列表",
+                            fontSize = 15.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = c.inkPrimary,
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(c.cardSurface)
+                        ) {
+                            state.liveLists.forEachIndexed { idx, list ->
+                                val listColor = ListStyle.colorFor(list.color)
+                                val count = state.activeTasksInList(list.id).size
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .combinedClickable(
+                                            onClick = { onNavigate(NavRoute.CustomList(list.id)) },
+                                            onLongClick = { onEditList(list) }
+                                        )
+                                        .padding(horizontal = 12.dp, vertical = 8.5.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(25.dp)
+                                            .clip(CircleShape)
+                                            .background(listColor),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = ListStyle.iconFor(list.icon),
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+
+                                    Spacer(Modifier.width(10.dp))
+
+                                    Text(
+                                        text = list.name,
+                                        fontSize = 14.5.sp,
+                                        color = c.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+
+                                    Text(
+                                        text = "$count",
+                                        fontSize = 13.5.sp,
+                                        color = c.inkSecondary
+                                    )
+                                    Spacer(Modifier.width(3.dp))
+                                    Icon(
+                                        imageVector = Icons.Rounded.ChevronRight,
+                                        contentDescription = null,
+                                        tint = c.inkTertiary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                                if (idx < state.liveLists.lastIndex) {
+                                    ThingsDivider(insetStart = 47.dp)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Compact 标签
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 6.dp)
+                                .padding(horizontal = 4.dp)
                         ) {
                             Text(
                                 text = "标签",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = c.inkSecondary
+                                fontSize = 15.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = c.inkPrimary,
+                                modifier = Modifier.weight(1f)
                             )
-                            Spacer(Modifier.weight(1f))
                             Text(
                                 text = "管理",
                                 fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
                                 color = c.accentBlue,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
@@ -241,88 +384,27 @@ fun OverviewScreen(
                             )
                         }
 
-                        OverviewCard {
-                            if (state.liveTags.isEmpty()) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable(onClick = onOpenTagManager)
-                                        .padding(horizontal = 16.dp, vertical = 14.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.Add,
-                                        contentDescription = null,
-                                        tint = c.accentBlue,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text("新建标签整理任务", fontSize = 15.sp, color = c.inkSecondary)
-                                }
-                            } else {
-                                state.liveTags.forEachIndexed { idx, tag ->
-                                    val count = state.liveTasks.count { !it.isDone && it.tagIds.contains(tag.id) }
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable { onNavigate(NavRoute.Tag(tag.id)) }
-                                            .padding(horizontal = 16.dp, vertical = 13.dp)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier.size(22.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(9.dp)
-                                                    .clip(CircleShape)
-                                                    .background(TagColors.colorFor(tag.hue))
-                                            )
-                                        }
-                                        Spacer(Modifier.width(12.dp))
-                                        Text(
-                                            text = tag.label,
-                                            fontSize = 15.5.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = c.inkPrimary,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        if (count > 0) {
-                                            Text(
-                                                text = "$count",
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = c.inkTertiary
-                                            )
-                                        }
-                                    }
-                                    if (idx < state.liveTags.lastIndex) {
-                                        ThingsDivider(insetStart = 50.dp)
-                                    }
-                                }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            HubTagChip(
+                                title = "所有标签",
+                                onClick = { onNavigate(NavRoute.AllTags) }
+                            )
+                            state.liveTags.forEach { tag ->
+                                HubTagChip(
+                                    title = "#${tag.label}",
+                                    onClick = { onNavigate(NavRoute.Tag(tag.id)) }
+                                )
                             }
                         }
                     }
                 }
-
-                item {
-                    OverviewCard {
-                        OverviewRow(
-                            title = "日志簿",
-                            icon = Icons.Rounded.AutoStories,
-                            iconTint = c.logbookGreen,
-                            count = state.logbookTasks.size,
-                            onClick = { onNavigate(NavRoute.Logbook) }
-                        )
-                    }
-                }
-
-                item { Spacer(Modifier.height(84.dp)) }
             }
         }
 
-        // Minimal Bottom Bar (Sync + Settings)
+        // Compact Bottom Bar
         ThingsDivider()
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -330,140 +412,128 @@ fun OverviewScreen(
                 .fillMaxWidth()
                 .background(c.hubBackground)
                 .navigationBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .padding(horizontal = 14.dp, vertical = 7.dp)
         ) {
-            val synced = state.syncStatus.syncedAt > 0
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable(onClick = onOpenSync)
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onNewReminder)
+                    .padding(horizontal = 4.dp, vertical = 3.dp)
             ) {
-                Box(
-                    Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(if (synced) c.logbookGreen else c.inkTertiary)
+                Icon(
+                    imageVector = Icons.Rounded.AddCircle,
+                    contentDescription = null,
+                    tint = c.accentBlue,
+                    modifier = Modifier.size(19.dp)
                 )
                 Text(
-                    text = if (synced) "已与 Mac 同步" else "配对 Mac 同步",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = c.inkSecondary
+                    text = "新提醒事项",
+                    fontSize = 14.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = c.accentBlue
                 )
             }
 
             Spacer(Modifier.weight(1f))
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            Text(
+                text = "添加列表",
+                fontSize = 14.5.sp,
+                color = c.accentBlue,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable(onClick = onOpenSettings)
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-            ) {
-                if (!notifGranted) {
-                    Box(
-                        Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(c.todayGold)
-                    )
-                }
-                Icon(
-                    imageVector = Icons.Rounded.Tune,
-                    contentDescription = "设置",
-                    tint = c.inkSecondary,
-                    modifier = Modifier.size(19.dp)
-                )
-                Text(
-                    text = "设置",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = c.inkSecondary
-                )
-            }
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onAddList)
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
+            )
         }
     }
 }
 
 @Composable
-private fun OverviewCard(content: @Composable ColumnScope.() -> Unit) {
-    val c = ThingsTheme.colors
-    Surface(
-        shape = RoundedCornerShape(15.dp),
-        color = c.cardSurface,
-        shadowElevation = if (c.isDark) 0.dp else 0.5.dp,
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(
-                width = 0.5.dp,
-                color = c.divider.copy(alpha = 0.7f),
-                shape = RoundedCornerShape(15.dp)
-            )
-    ) {
-        Column(content = content)
-    }
-}
-
-@Composable
-private fun OverviewRow(
+private fun SmartGridCard(
     title: String,
+    count: Int?,
+    tint: Color,
     icon: ImageVector,
-    iconTint: Color,
-    count: Int,
-    alertCount: Int = 0,
+    modifier: Modifier = Modifier,
+    badgeText: String? = null,
     onClick: () -> Unit
 ) {
     val c = ThingsTheme.colors
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(c.cardSurface)
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 13.5.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = iconTint,
-            modifier = Modifier.size(22.dp)
-        )
-        Spacer(Modifier.width(12.dp))
-        Text(
-            text = title,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Medium,
-            color = c.inkPrimary,
-            modifier = Modifier.weight(1f)
-        )
-        if (alertCount > 0) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Box(
                 modifier = Modifier
-                    .padding(end = 8.dp)
+                    .size(25.dp)
                     .clip(CircleShape)
-                    .background(c.danger)
-                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                    .background(tint),
                 contentAlignment = Alignment.Center
             ) {
+                if (badgeText != null) {
+                    Text(
+                        text = badgeText,
+                        color = Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                } else {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            if (count != null) {
                 Text(
-                    text = "$alertCount",
-                    fontSize = 11.5.sp,
+                    text = "$count",
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    color = c.inkPrimary
                 )
             }
         }
-        if (count > 0) {
-            Text(
-                text = "$count",
-                fontSize = 14.5.sp,
-                fontWeight = FontWeight.Medium,
-                color = c.inkTertiary
-            )
-        }
+        Text(
+            text = title,
+            fontSize = 12.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = c.inkSecondary
+        )
+    }
+}
+
+@Composable
+private fun HubTagChip(
+    title: String,
+    onClick: () -> Unit
+) {
+    val c = ThingsTheme.colors
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(c.cardSurface)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+    ) {
+        Text(
+            text = title,
+            fontSize = 12.5.sp,
+            fontWeight = FontWeight.Medium,
+            color = c.inkPrimary
+        )
     }
 }

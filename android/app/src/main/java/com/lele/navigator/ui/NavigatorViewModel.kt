@@ -5,11 +5,13 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lele.navigator.data.CoreRepository
+import com.lele.navigator.model.DEFAULT_LIST_ID
 import com.lele.navigator.model.DateUtils
 import com.lele.navigator.model.SubtaskItem
 import com.lele.navigator.model.SyncStatus
 import com.lele.navigator.model.TagItem
 import com.lele.navigator.model.TaskItem
+import com.lele.navigator.model.TaskListItem
 import com.lele.navigator.notify.ReminderScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,22 +31,35 @@ data class UndoMessage(
 data class NavigatorUiState(
     val tasks: List<TaskItem> = emptyList(),
     val tags: List<TagItem> = emptyList(),
+    val lists: List<TaskListItem> = emptyList(),
     val syncStatus: SyncStatus = SyncStatus(),
     val searchQuery: String = "",
-    val selectedTagId: String? = null,
+    val editingTaskId: String? = null,
     val undoMessage: UndoMessage? = null,
     val appearanceMode: String = "system", // "system" | "light" | "dark"
     val leadReminderMinutes: Int = 0
 ) {
     val liveTasks: List<TaskItem> get() = tasks.filter { !it.deleted }
     val liveTags: List<TagItem> get() = tags.filter { !it.deleted }.sortedBy { it.order }
+    val liveLists: List<TaskListItem>
+        get() {
+            val active = lists.filter { !it.deleted }.sortedBy { it.order }
+            return active.ifEmpty {
+                listOf(TaskListItem(id = DEFAULT_LIST_ID, name = "提醒", color = "orange", icon = "list"))
+            }
+        }
 
-    private fun matches(t: TaskItem): Boolean {
-        if (selectedTagId != null && !t.tagIds.contains(selectedTagId)) return false
-        val q = searchQuery.trim().lowercase()
+    fun listFor(id: String?): TaskListItem {
+        val target = if (id.isNullOrBlank()) DEFAULT_LIST_ID else id
+        return liveLists.firstOrNull { it.id == target } ?: liveLists.first()
+    }
+
+    fun matchesSearch(t: TaskItem, query: String = searchQuery): Boolean {
+        val q = query.trim().lowercase()
         if (q.isEmpty()) return true
         if (t.title.lowercase().contains(q) ||
             t.notes.lowercase().contains(q) ||
+            t.url.lowercase().contains(q) ||
             t.subtasks.any { it.title.lowercase().contains(q) }
         ) return true
         return t.tagIds.any { tid ->
@@ -52,31 +67,35 @@ data class NavigatorUiState(
         }
     }
 
-    val overdueTasks: List<TaskItem>
-        get() = liveTasks.filter { !it.isDone && DateUtils.isOverdue(it.dueAt) && matches(it) }
+    val todayTasks: List<TaskItem>
+        get() = liveTasks.filter { !it.isDone && (DateUtils.isOverdue(it.dueAt) || DateUtils.isDueToday(it.dueAt)) }
 
-    val todayActiveTasks: List<TaskItem>
-        get() = liveTasks.filter {
-            !it.isDone && !DateUtils.isOverdue(it.dueAt) &&
-                (DateUtils.isDueToday(it.dueAt) || it.isDoing) && matches(it)
-        }
-
-    val todayCompletedTasks: List<TaskItem>
-        get() = liveTasks.filter { it.isDone && DateUtils.isCompletedToday(it.completedAt) && matches(it) }
-
-    val doingTasks: List<TaskItem>
-        get() = liveTasks.filter { it.isDoing && matches(it) }
-
-    val todoTasks: List<TaskItem>
-        get() = liveTasks.filter { it.status == "todo" && matches(it) }
-
-    val upcomingTasks: List<TaskItem>
-        get() = liveTasks.filter { !it.isDone && !it.dueAt.isNullOrBlank() && matches(it) }
+    val scheduledTasks: List<TaskItem>
+        get() = liveTasks.filter { !it.isDone && !it.dueAt.isNullOrBlank() }
             .sortedBy { it.dueAt }
 
-    val logbookTasks: List<TaskItem>
-        get() = liveTasks.filter { it.isDone && matches(it) }
+    val allActiveTasks: List<TaskItem>
+        get() = liveTasks.filter { !it.isDone }
+
+    val flaggedTasks: List<TaskItem>
+        get() = liveTasks.filter { !it.isDone && it.flagged }
+
+    val completedTasks: List<TaskItem>
+        get() = liveTasks.filter { it.isDone }
             .sortedByDescending { it.completedAt ?: 0L }
+
+    fun activeTasksInList(listId: String): List<TaskItem> =
+        liveTasks.filter { !it.isDone && it.effectiveListId == listId }
+
+    fun completedTasksInList(listId: String): List<TaskItem> =
+        liveTasks.filter { it.isDone && it.effectiveListId == listId }
+            .sortedByDescending { it.completedAt ?: 0L }
+
+    fun activeTasksForTag(tagId: String): List<TaskItem> =
+        liveTasks.filter { !it.isDone && it.tagIds.contains(tagId) }
+
+    fun allTaggedActiveTasks(): List<TaskItem> =
+        liveTasks.filter { !it.isDone && it.tagIds.isNotEmpty() }
 }
 
 class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
@@ -105,7 +124,12 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             _state.update {
-                it.copy(tasks = board.tasks, tags = board.tags, syncStatus = status)
+                it.copy(
+                    tasks = board.tasks,
+                    tags = board.tags,
+                    lists = board.lists,
+                    syncStatus = status
+                )
             }
             ReminderScheduler.rescheduleAll(getApplication(), board.tasks, _state.value.leadReminderMinutes)
         }
@@ -114,7 +138,14 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
     private fun reloadInternal() {
         val board = repo.loadBoard()
         val status = repo.syncStatus()
-        _state.update { it.copy(tasks = board.tasks, tags = board.tags, syncStatus = status) }
+        _state.update {
+            it.copy(
+                tasks = board.tasks,
+                tags = board.tags,
+                lists = board.lists,
+                syncStatus = status
+            )
+        }
         ReminderScheduler.rescheduleAll(getApplication(), board.tasks, _state.value.leadReminderMinutes)
     }
 
@@ -135,8 +166,25 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(searchQuery = query) }
     }
 
-    fun setTagFilter(tagId: String?) {
-        _state.update { it.copy(selectedTagId = tagId) }
+    fun setEditingTask(taskId: String?) {
+        val prev = _state.value.editingTaskId
+        if (prev != null && prev != taskId) {
+            commitInlineEditIfEmpty(prev)
+        }
+        _state.update { it.copy(editingTaskId = taskId) }
+    }
+
+    fun commitInlineEditIfEmpty(taskId: String) {
+        val existing = _state.value.liveTasks.firstOrNull { it.id == taskId } ?: return
+        if (existing.title.isBlank() && existing.notes.isBlank() && existing.subtasks.isEmpty() && existing.attachments.isEmpty()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                repo.deleteTask(taskId, true)
+                reloadInternal()
+            }
+            _state.update { st ->
+                st.copy(editingTaskId = if (st.editingTaskId == taskId) null else st.editingTaskId)
+            }
+        }
     }
 
     fun clearUndo() {
@@ -147,31 +195,43 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(undoMessage = UndoMessage(text, undo = null)) }
     }
 
-    fun createTask(
-        title: String,
-        status: String = "todo",
+    fun createInlineTask(
+        listId: String? = null,
+        title: String = "",
+        dueAt: String? = null,
+        flagged: Boolean = false,
         tagIds: List<String> = emptyList(),
-        dueAt: String? = null
+        focusInline: Boolean = true
     ) {
-        val clean = title.trim()
-        if (clean.isEmpty()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            val minRank = _state.value.liveTasks.minOfOrNull { it.rank } ?: 1000.0
-            val task = TaskItem(
-                id = "t_${UUID.randomUUID().toString().take(12)}",
-                title = clean,
-                status = status,
-                tagIds = tagIds,
-                dueAt = dueAt,
-                rank = minRank - 100.0,
-                createdAt = now,
-                updatedAt = now,
-                stamps = mapOf(
-                    "title" to now, "status" to now, "tagIds" to now,
-                    "dueAt" to now, "rank" to now, "deleted" to now
-                )
+        val targetList = if (!listId.isNullOrBlank()) listId else _state.value.liveLists.first().id
+        val now = System.currentTimeMillis()
+        val maxRank = _state.value.liveTasks.maxOfOrNull { it.rank } ?: 0.0
+        val newId = "t_${UUID.randomUUID().toString().take(12)}"
+        val task = TaskItem(
+            id = newId,
+            title = title.trim(),
+            status = "todo",
+            listId = targetList,
+            flagged = flagged,
+            priority = 0,
+            tagIds = tagIds,
+            dueAt = dueAt,
+            rank = maxRank + 1000.0,
+            createdAt = now,
+            updatedAt = now,
+            stamps = mapOf(
+                "title" to now, "status" to now, "listId" to now,
+                "flagged" to now, "priority" to now, "tagIds" to now,
+                "dueAt" to now, "rank" to now, "deleted" to now
             )
+        )
+        _state.update { st ->
+            st.copy(
+                tasks = st.tasks + task,
+                editingTaskId = if (focusInline) newId else st.editingTaskId
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
             repo.saveTask(task)
             reloadInternal()
         }
@@ -200,7 +260,7 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
         pendingSaveJobs.remove(taskId)?.cancel()
         if (debounced) {
             pendingSaveJobs[taskId] = viewModelScope.launch(Dispatchers.IO) {
-                delay(350L)
+                delay(320L)
                 repo.saveTask(updated)
                 if (affectsReminder) {
                     ReminderScheduler.rescheduleAll(getApplication(), snapshot, _state.value.leadReminderMinutes)
@@ -219,6 +279,9 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleComplete(taskId: String) {
         val existing = _state.value.liveTasks.firstOrNull { it.id == taskId } ?: return
         val nextDone = !existing.isDone
+        if (nextDone && _state.value.editingTaskId == taskId) {
+            _state.update { it.copy(editingTaskId = null) }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             val saved = repo.completeTask(taskId, nextDone)
             val spawned = if (nextDone) saved.firstOrNull { it.id != taskId } else null
@@ -226,7 +289,7 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
             if (nextDone) {
                 _state.update {
                     it.copy(
-                        undoMessage = UndoMessage("已完成「${existing.title.ifBlank { "未命名任务" }}」") {
+                        undoMessage = UndoMessage("已完成「${existing.title.ifBlank { "未命名提醒" }}」") {
                             viewModelScope.launch(Dispatchers.IO) {
                                 repo.completeTask(taskId, false)
                                 if (spawned != null) {
@@ -241,25 +304,54 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun toggleDoing(taskId: String) {
+    fun toggleFlag(taskId: String) {
         updateTask(taskId) { t, now ->
-            val next = if (t.isDoing) "todo" else "doing"
-            t.copy(
-                status = next,
-                completedAt = null,
-                stamps = t.stamps + ("status" to now) + ("completedAt" to now)
-            )
+            t.copy(flagged = !t.flagged, stamps = t.stamps + ("flagged" to now))
+        }
+    }
+
+    fun setPriority(taskId: String, priority: Int) {
+        updateTask(taskId) { t, now ->
+            t.copy(priority = priority.coerceIn(0, 3), stamps = t.stamps + ("priority" to now))
+        }
+    }
+
+    fun moveTaskToList(taskId: String, listId: String) {
+        updateTask(taskId) { t, now ->
+            t.copy(listId = listId, stamps = t.stamps + ("listId" to now))
+        }
+    }
+
+    fun clearCompleted(listId: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val cleared = repo.clearCompleted(listId)
+            if (cleared.isEmpty()) return@launch
+            reloadInternal()
+            val ids = cleared.map { it.id }
+            _state.update {
+                it.copy(
+                    undoMessage = UndoMessage("已清除 ${cleared.size} 项已完成提醒") {
+                        viewModelScope.launch(Dispatchers.IO) {
+                            ids.forEach { id -> repo.deleteTask(id, false) }
+                            reloadInternal()
+                        }
+                    }
+                )
+            }
         }
     }
 
     fun deleteTask(taskId: String) {
         val existing = _state.value.liveTasks.firstOrNull { it.id == taskId } ?: return
+        if (_state.value.editingTaskId == taskId) {
+            _state.update { it.copy(editingTaskId = null) }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             repo.deleteTask(taskId, true)
             reloadInternal()
             _state.update {
                 it.copy(
-                    undoMessage = UndoMessage("已删除「${existing.title.ifBlank { "未命名任务" }}」") {
+                    undoMessage = UndoMessage("已删除「${existing.title.ifBlank { "未命名提醒" }}」") {
                         viewModelScope.launch(Dispatchers.IO) {
                             repo.deleteTask(taskId, false)
                             reloadInternal()
@@ -269,6 +361,42 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    // MARK: - Lists
+
+    fun createList(name: String, color: String, icon: String) {
+        val clean = name.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val list = TaskListItem(
+                id = "list_${UUID.randomUUID().toString().take(8)}",
+                name = clean,
+                color = color,
+                icon = icon,
+                order = (_state.value.liveLists.maxOfOrNull { it.order } ?: -1) + 1,
+                updatedAt = System.currentTimeMillis()
+            )
+            repo.saveList(list)
+            reloadInternal()
+        }
+    }
+
+    fun updateList(list: TaskListItem) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repo.saveList(list.copy(updatedAt = System.currentTimeMillis()))
+            reloadInternal()
+        }
+    }
+
+    fun deleteList(listId: String) {
+        if (_state.value.liveLists.size <= 1) return
+        viewModelScope.launch(Dispatchers.IO) {
+            repo.deleteList(listId)
+            reloadInternal()
+        }
+    }
+
+    // MARK: - Subtasks
 
     fun addSubtask(taskId: String, title: String) {
         val clean = title.trim()
@@ -311,6 +439,8 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
     }
+
+    // MARK: - Sync / Tags / Export / Attachments
 
     fun pairWithMac(code: String, manualAddr: String) {
         viewModelScope.launch(Dispatchers.IO) {

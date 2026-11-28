@@ -6,8 +6,8 @@ GO ?= /usr/local/go/bin/go
 GOPATH_BIN := $(shell $(GO) env GOPATH)/bin
 GOMOBILE ?= $(shell command -v gomobile 2>/dev/null || echo "$(GOPATH_BIN)/gomobile")
 APP_NAME := TODO
-VERSION ?= 0.2.0
-BUILD_NUM ?= 20
+VERSION ?= 0.3.0
+BUILD_NUM ?= 30
 
 MAC_LIB_DIR := macos/Lib
 ANDROID_LIBS_DIR := android/app/libs

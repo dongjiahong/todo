@@ -1,72 +1,71 @@
 package com.lele.navigator.ui.components
 
+import android.graphics.BitmapFactory
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.lele.navigator.ui.theme.ThingsTheme
 
 /**
- * Things 3 signature rounded-square checkbox with spring micro-animation and haptic feedback.
+ * Apple Reminders circular checkbox (empty ring when unchecked, inner filled dot + colored ring when checked).
  */
 @Composable
 fun ThingsCheckbox(
     checked: Boolean,
     onCheckedChange: () -> Unit,
     modifier: Modifier = Modifier,
-    isDoing: Boolean = false,
-    isCircular: Boolean = false,
-    size: Dp = 20.dp
+    tint: Color? = null,
+    size: Dp = 19.dp
 ) {
     val c = ThingsTheme.colors
+    val activeTint = tint ?: c.accentBlue
     val haptic = LocalHapticFeedback.current
-    val shape = if (isCircular) CircleShape else RoundedCornerShape(6.dp)
 
-    val fillColor by animateColorAsState(
-        targetValue = when {
-            checked -> c.accentBlue
-            else -> Color.Transparent
-        },
-        label = "cbFill"
-    )
     val borderColor by animateColorAsState(
-        targetValue = when {
-            checked -> c.accentBlue
-            isDoing -> c.doingBlue
-            else -> c.checkboxBorder
-        },
+        targetValue = if (checked) activeTint else c.checkboxBorder,
         label = "cbBorder"
     )
     val scale by animateFloatAsState(
@@ -80,7 +79,7 @@ fun ThingsCheckbox(
 
     Box(
         modifier = modifier
-            .size(40.dp)
+            .size(32.dp)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
@@ -94,21 +93,16 @@ fun ThingsCheckbox(
             modifier = Modifier
                 .size(size)
                 .scale(scale)
-                .clip(shape)
-                .background(fillColor)
-                .border(
-                    width = if (checked) 0.dp else 1.6.dp,
-                    color = borderColor,
-                    shape = shape
-                ),
+                .clip(CircleShape)
+                .border(width = 1.5.dp, color = borderColor, shape = CircleShape),
             contentAlignment = Alignment.Center
         ) {
             if (checked) {
-                Icon(
-                    imageVector = Icons.Rounded.Check,
-                    contentDescription = "已完成",
-                    tint = Color.White,
-                    modifier = Modifier.size(size * 0.66f)
+                Box(
+                    modifier = Modifier
+                        .size(size - 6.dp)
+                        .clip(CircleShape)
+                        .background(activeTint)
                 )
             }
         }
@@ -116,46 +110,7 @@ fun ThingsCheckbox(
 }
 
 /**
- * Things 3 signature circular blue Magic Plus floating action button.
- */
-@Composable
-fun ThingsMagicFab(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val c = ThingsTheme.colors
-    val haptic = LocalHapticFeedback.current
-
-    Surface(
-        onClick = {
-            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            onClick()
-        },
-        shape = CircleShape,
-        color = c.accentBlue,
-        contentColor = Color.White,
-        modifier = modifier
-            .size(56.dp)
-            .shadow(
-                elevation = 10.dp,
-                shape = CircleShape,
-                ambientColor = c.accentBlue.copy(alpha = 0.45f),
-                spotColor = c.accentBlue.copy(alpha = 0.45f)
-            )
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(
-                imageVector = Icons.Rounded.Add,
-                contentDescription = "新建任务",
-                tint = Color.White,
-                modifier = Modifier.size(28.dp)
-            )
-        }
-    }
-}
-
-/**
- * Tiny Things-style circular progress pie/ring for subtask checklist progress.
+ * Tiny circular progress pie/ring for subtask checklist progress.
  */
 @Composable
 fun MiniProgressRing(
@@ -168,8 +123,8 @@ fun MiniProgressRing(
     val trackColor = c.checkboxBorder.copy(alpha = 0.6f)
     val fillColor = if (done == total && total > 0) c.logbookGreen else c.accentBlue
 
-    Canvas(modifier = modifier.size(12.dp)) {
-        val stroke = 1.6.dp.toPx()
+    Canvas(modifier = modifier.size(11.dp)) {
+        val stroke = 1.5.dp.toPx()
         drawCircle(
             color = trackColor,
             style = Stroke(width = stroke)
@@ -187,7 +142,7 @@ fun MiniProgressRing(
 }
 
 /**
- * Clean pill badge used across task rows, detail editors, and capture sheets.
+ * Compact pill badge used across task rows, inspector sheets, and capture sheets.
  */
 @Composable
 fun ThingsPill(
@@ -204,17 +159,17 @@ fun ThingsPill(
         .clip(shape)
         .background(backgroundColor)
         .let { if (onClick != null) it.clickable(onClick = onClick) else it }
-        .padding(horizontal = 8.dp, vertical = 4.dp)
+        .padding(horizontal = 7.dp, vertical = 3.5.dp)
 
     Row(
         modifier = base,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+        horizontalArrangement = Arrangement.spacedBy(3.5.dp)
     ) {
         if (dotColor != null) {
             Box(
                 Modifier
-                    .size(6.dp)
+                    .size(5.5.dp)
                     .clip(CircleShape)
                     .background(dotColor)
             )
@@ -224,7 +179,7 @@ fun ThingsPill(
                 imageVector = icon,
                 contentDescription = null,
                 tint = textColor,
-                modifier = Modifier.size(12.dp)
+                modifier = Modifier.size(11.5.dp)
             )
         }
         Text(
@@ -238,43 +193,7 @@ fun ThingsPill(
 }
 
 /**
- * Whisper-quiet section header in Things 3 style.
- */
-@Composable
-fun ThingsSectionHeader(
-    title: String,
-    count: Int? = null,
-    accentColor: Color? = null,
-    modifier: Modifier = Modifier
-) {
-    val c = ThingsTheme.colors
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Text(
-            text = title,
-            color = accentColor ?: c.inkSecondary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.1.sp
-        )
-        if (count != null && count > 0) {
-            Text(
-                text = "$count",
-                color = (accentColor ?: c.inkTertiary).copy(alpha = 0.8f),
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            )
-        }
-    }
-}
-
-/**
- * Hairline inset divider matching Things 3 list rhythm.
+ * Hairline inset divider matching Apple Reminders rhythm.
  */
 @Composable
 fun ThingsDivider(
@@ -289,4 +208,127 @@ fun ThingsDivider(
             .height(0.6.dp)
             .background(c.divider)
     )
+}
+
+/**
+ * Full-screen zoomable & pannable image preview dialog (pinch-to-zoom, double-tap, +/- controls).
+ */
+@Composable
+fun ZoomableImageDialog(
+    imagePath: String,
+    onDismiss: () -> Unit
+) {
+    val bmp = remember(imagePath) { BitmapFactory.decodeFile(imagePath) } ?: return
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.94f))
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            if (scale > 1.2f) {
+                                scale = 1f
+                                offset = Offset.Zero
+                            } else {
+                                scale = 2.5f
+                            }
+                        }
+                    )
+                }
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        val nextScale = (scale * zoom).coerceIn(1f, 5f)
+                        scale = nextScale
+                        offset = if (nextScale <= 1.02f) Offset.Zero else offset + pan
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = scale,
+                        scaleY = scale,
+                        translationX = offset.x,
+                        translationY = offset.y
+                    )
+            )
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(16.dp)
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.16f))
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = "关闭",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 24.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color.White.copy(alpha = 0.16f))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "－",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable {
+                            scale = (scale - 0.5f).coerceAtLeast(1f)
+                            if (scale <= 1.02f) offset = Offset.Zero
+                        }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+                Text(
+                    text = "${(scale * 100).toInt()}%",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clickable {
+                        scale = 1f
+                        offset = Offset.Zero
+                    }
+                )
+                Text(
+                    text = "＋",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable { scale = (scale + 0.5f).coerceAtMost(5f) }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+    }
 }

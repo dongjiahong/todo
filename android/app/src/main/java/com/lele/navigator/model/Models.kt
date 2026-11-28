@@ -1,12 +1,17 @@
 package com.lele.navigator.model
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import kotlinx.serialization.Serializable
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+
+const val DEFAULT_LIST_ID = "list_reminders"
 
 @Serializable
 data class SubtaskItem(
@@ -17,11 +22,26 @@ data class SubtaskItem(
 )
 
 @Serializable
+data class TaskListItem(
+    val id: String,
+    val name: String,
+    val color: String = "blue",
+    val icon: String = "list",
+    val order: Int = 0,
+    val updatedAt: Long = 0L,
+    val deleted: Boolean = false
+)
+
+@Serializable
 data class TaskItem(
     val id: String,
     val title: String = "",
     val notes: String = "",
-    val status: String = "todo", // "todo" | "doing" | "done"
+    val status: String = "todo", // "todo" | "done"
+    val listId: String = DEFAULT_LIST_ID,
+    val flagged: Boolean = false,
+    val priority: Int = 0, // 0=none, 1=low, 2=medium, 3=high
+    val url: String = "",
     val subtasks: List<SubtaskItem> = emptyList(),
     val tagIds: List<String> = emptyList(),
     val dueAt: String? = null,
@@ -35,7 +55,14 @@ data class TaskItem(
     val stamps: Map<String, Long> = emptyMap()
 ) {
     val isDone: Boolean get() = status == "done"
-    val isDoing: Boolean get() = status == "doing"
+    val effectiveListId: String get() = listId.ifBlank { DEFAULT_LIST_ID }
+    val priorityPrefix: String
+        get() = when (priority) {
+            1 -> "!"
+            2 -> "!!"
+            3 -> "!!!"
+            else -> ""
+        }
     val checklistDone: Int get() = subtasks.count { it.done }
     val checklistTotal: Int get() = subtasks.size
 }
@@ -54,6 +81,7 @@ data class TagItem(
 data class BoardState(
     val tasks: List<TaskItem> = emptyList(),
     val tags: List<TagItem> = emptyList(),
+    val lists: List<TaskListItem> = emptyList(),
     val seeded: Boolean = false
 )
 
@@ -84,17 +112,47 @@ data class SyncEvent(
     val type: String,
     val tasks: List<TaskItem>? = null,
     val tags: List<TagItem>? = null,
+    val lists: List<TaskListItem>? = null,
     val status: SyncStatus? = null,
     val at: Long? = null
 )
 
+object ListStyle {
+    val allColors = listOf("blue", "orange", "green", "red", "purple", "pink", "yellow", "gray")
+    val allIcons = listOf("list", "work", "study", "life", "home", "cart", "star", "book", "code", "heart")
+
+    fun colorFor(key: String): Color = when (key) {
+        "orange" -> Color(0xFFFF9500)
+        "green" -> Color(0xFF34C759)
+        "red" -> Color(0xFFFF3B30)
+        "purple" -> Color(0xFFAF52DE)
+        "pink" -> Color(0xFFFF2D55)
+        "yellow" -> Color(0xFFF2AF00)
+        "gray" -> Color(0xFF8E8E93)
+        else -> Color(0xFF007AFF)
+    }
+
+    fun iconFor(key: String): ImageVector = when (key) {
+        "work" -> Icons.Rounded.Computer
+        "study" -> Icons.Rounded.School
+        "life" -> Icons.Rounded.SportsEsports
+        "home" -> Icons.Rounded.Home
+        "cart" -> Icons.Rounded.ShoppingCart
+        "star" -> Icons.Rounded.Star
+        "book" -> Icons.Rounded.MenuBook
+        "code" -> Icons.Rounded.Code
+        "heart" -> Icons.Rounded.Favorite
+        else -> Icons.Rounded.FormatListBulleted
+    }
+}
+
 object TagColors {
     fun colorFor(hue: String): Color = when (hue) {
-        "green" -> Color(0xFF28A76E)
-        "purple" -> Color(0xFF8B5CF6)
-        "amber" -> Color(0xFFE59500)
-        "red" -> Color(0xFFE5484D)
-        else -> Color(0xFF3178F6)
+        "green" -> Color(0xFF34C759)
+        "purple" -> Color(0xFFAF52DE)
+        "amber" -> Color(0xFFFF9500)
+        "red" -> Color(0xFFFF3B30)
+        else -> Color(0xFF007AFF)
     }
 
     val allHues = listOf("blue", "green", "purple", "amber", "red")
@@ -102,6 +160,8 @@ object TagColors {
 
 object DateUtils {
     private val dueFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm")
+
+    fun todayDayNumber(): Int = LocalDate.now().dayOfMonth
 
     fun parseDue(dueAt: String?): LocalDateTime? {
         if (dueAt.isNullOrBlank()) return null
@@ -141,7 +201,7 @@ object DateUtils {
             else -> if (d.year == today.year) "${d.monthValue}月${d.dayOfMonth}日" else "${d.year}年${d.monthValue}月${d.dayOfMonth}日"
         }
         val late = !settled && dt.isBefore(LocalDateTime.now())
-        if (late) return "已逾期 · $day $time" to 2
+        if (late) return "$day $time" to 2
         if (!settled && d == today) return "今天 $time" to 1
         return "$day $time" to 0
     }
@@ -155,20 +215,6 @@ object DateUtils {
             today.minusDays(1) -> "昨天"
             else -> "${d.monthValue}月${d.dayOfMonth}日"
         }
-    }
-
-    fun todaySubtitle(): String {
-        val today = LocalDate.now()
-        val wd = when (today.dayOfWeek.value) {
-            1 -> "周一"
-            2 -> "周二"
-            3 -> "周三"
-            4 -> "周四"
-            5 -> "周五"
-            6 -> "周六"
-            else -> "周日"
-        }
-        return "${today.monthValue}月${today.dayOfMonth}日 · $wd"
     }
 
     fun upcomingGroupLabel(dueAt: String?): String {

@@ -1,15 +1,17 @@
 package com.lele.navigator.ui
 
+import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,7 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -39,555 +40,292 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lele.navigator.model.DateUtils
+import com.lele.navigator.model.ListStyle
 import com.lele.navigator.model.TagColors
 import com.lele.navigator.model.TagItem
 import com.lele.navigator.model.TaskItem
+import com.lele.navigator.model.TaskListItem
 import com.lele.navigator.ui.components.ThingsCheckbox
 import com.lele.navigator.ui.components.ThingsDivider
 import com.lele.navigator.ui.components.ThingsPill
 import com.lele.navigator.ui.theme.ThingsTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
- * Things 3-inspired floating white card task editor.
- * Clean borderless title + notes, circular subtask checklist, and subtle bottom metadata bar.
+ * Apple Reminders `(i)` Inspector ModalBottomSheet for Android.
  */
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun TaskDetailScreen(
+fun TaskInspectorSheet(
     task: TaskItem,
+    lists: List<TaskListItem>,
     tags: List<TagItem>,
     vm: NavigatorViewModel,
-    onBack: () -> Unit
+    onDismiss: () -> Unit
 ) {
     val c = ThingsTheme.colors
-    var newSubtask by remember { mutableStateOf("") }
-    var showDueSheet by remember { mutableStateOf(false) }
-    var showTagPicker by remember { mutableStateOf(false) }
-    var previewPath by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    var title by remember(task.id) { mutableStateOf(task.title) }
+    var notes by remember(task.id) { mutableStateOf(task.notes) }
+    var urlText by remember(task.id) { mutableStateOf(task.url) }
+    var newSubtask by remember(task.id) { mutableStateOf("") }
+    var showDueSheet by remember { mutableStateOf(false) }
+    var previewFile by remember { mutableStateOf<String?>(null) }
 
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
             runCatching {
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    val bytes = stream.readBytes()
-                    if (bytes.isNotEmpty()) {
-                        vm.attachImage(task.id, bytes, "jpg")
-                    }
-                }
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull()?.let { bytes ->
+                vm.attachImage(task.id, bytes, "jpg")
             }
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(c.hubBackground)
-            .statusBarsPadding()
-            .imePadding()
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = c.hubBackground,
+        shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+        dragHandle = { SheetDragHandle() }
     ) {
-        // Minimal Things 3 top bar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable(onClick = onBack)
-                    .padding(horizontal = 6.dp, vertical = 6.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.ChevronLeft,
-                    contentDescription = "返回",
-                    tint = c.accentBlue,
-                    modifier = Modifier.size(24.dp)
-                )
-                Text(
-                    text = "返回",
-                    color = c.accentBlue,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-
-            Spacer(Modifier.weight(1f))
-
-            IconButton(
-                onClick = {
-                    photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                }
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.AddPhotoAlternate,
-                    contentDescription = "添加图片",
-                    tint = c.inkSecondary,
-                    modifier = Modifier.size(21.dp)
-                )
-            }
-
-            IconButton(
-                onClick = {
-                    vm.deleteTask(task.id)
-                    onBack()
-                }
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.DeleteOutline,
-                    contentDescription = "删除任务",
-                    tint = c.danger,
-                    modifier = Modifier.size(21.dp)
-                )
-            }
-        }
-
-        // Scrollable floating Things 3 card
         Column(
             modifier = Modifier
-                .weight(1f)
+                .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp)
-                .navigationBarsPadding(),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .imePadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = c.cardSurface,
-                shadowElevation = if (c.isDark) 0.dp else 2.dp,
+            // Header bar
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("详细信息", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = c.inkPrimary)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "完成",
+                    fontSize = 15.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = c.accentBlue,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+
+            // Card 1: Title, Notes, URL
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(
-                        width = 0.6.dp,
-                        color = c.divider.copy(alpha = 0.8f),
-                        shape = RoundedCornerShape(18.dp)
-                    )
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(c.cardSurface)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Column(
+                BasicTextField(
+                    value = title,
+                    onValueChange = { valNext ->
+                        title = valNext
+                        vm.updateTask(task.id, debounced = true) { t, now ->
+                            t.copy(title = valNext, stamps = t.stamps + ("title" to now))
+                        }
+                    },
+                    textStyle = TextStyle(color = c.inkPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold),
+                    cursorBrush = SolidColor(c.accentBlue),
+                    modifier = Modifier.fillMaxWidth(),
+                    decorationBox = { inner ->
+                        if (title.isEmpty()) Text("标题", color = c.inkTertiary, fontSize = 17.sp)
+                        inner()
+                    }
+                )
+                ThingsDivider()
+                BasicTextField(
+                    value = notes,
+                    onValueChange = { valNext ->
+                        notes = valNext
+                        vm.updateTask(task.id, debounced = true) { t, now ->
+                            t.copy(notes = valNext, stamps = t.stamps + ("notes" to now))
+                        }
+                    },
+                    textStyle = TextStyle(color = c.inkSecondary, fontSize = 14.5.sp),
+                    cursorBrush = SolidColor(c.accentBlue),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 18.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    // Title row with Things checkbox
-                    Row(
-                        verticalAlignment = Alignment.Top,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        ThingsCheckbox(
-                            checked = task.isDone,
-                            isDoing = task.isDoing,
-                            onCheckedChange = { vm.toggleComplete(task.id) },
-                            modifier = Modifier.offset(x = (-6).dp, y = (-4).dp)
-                        )
-                        BasicTextField(
-                            value = task.title,
-                            onValueChange = { valText ->
-                                vm.updateTask(task.id, debounced = true) { t, now ->
-                                    t.copy(title = valText, stamps = t.stamps + ("title" to now))
-                                }
-                            },
-                            textStyle = TextStyle(
-                                color = if (task.isDone) c.inkSecondary else c.inkPrimary,
-                                fontSize = 19.sp,
-                                lineHeight = 26.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                textDecoration = if (task.isDone) TextDecoration.LineThrough else TextDecoration.None
-                            ),
-                            cursorBrush = SolidColor(c.accentBlue),
-                            modifier = Modifier
-                                .weight(1f)
-                                .offset(x = (-6).dp),
-                            decorationBox = { inner ->
-                                if (task.title.isEmpty()) {
-                                    Text(
-                                        "新待办事项",
-                                        color = c.inkTertiary,
-                                        fontSize = 19.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                                inner()
-                            }
-                        )
+                        .heightIn(min = 44.dp),
+                    decorationBox = { inner ->
+                        if (notes.isEmpty()) Text("备注", color = c.inkTertiary, fontSize = 14.5.sp)
+                        inner()
                     }
-
-                    // Seamless borderless Notes editor
+                )
+                ThingsDivider()
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     BasicTextField(
-                        value = task.notes,
-                        onValueChange = { text ->
+                        value = urlText,
+                        onValueChange = { valNext ->
+                            urlText = valNext
                             vm.updateTask(task.id, debounced = true) { t, now ->
-                                t.copy(notes = text, stamps = t.stamps + ("notes" to now))
+                                t.copy(url = valNext.trim(), stamps = t.stamps + ("url" to now))
                             }
                         },
-                        textStyle = TextStyle(
-                            color = c.inkPrimary,
-                            fontSize = 14.5.sp,
-                            lineHeight = 22.sp
-                        ),
+                        singleLine = true,
+                        textStyle = TextStyle(color = c.accentBlue, fontSize = 14.sp),
                         cursorBrush = SolidColor(c.accentBlue),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .defaultMinSize(minHeight = 76.dp)
-                            .padding(start = 28.dp),
+                        modifier = Modifier.weight(1f),
                         decorationBox = { inner ->
-                            if (task.notes.isEmpty()) {
-                                Text(
-                                    "备注",
-                                    color = c.inkTertiary,
-                                    fontSize = 14.5.sp
-                                )
-                            }
+                            if (urlText.isEmpty()) Text("URL", color = c.inkTertiary, fontSize = 14.sp)
                             inner()
                         }
                     )
-
-                    // Auto-detected clickable URLs from notes
-                    val noteUrls = remember(task.notes) { extractUrlsFromText(task.notes) }
-                    if (noteUrls.isNotEmpty()) {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 28.dp)
+                    if (urlText.isNotBlank()) {
+                        IconButton(
+                            onClick = {
+                                val raw = urlText.trim()
+                                val uri = Uri.parse(if (raw.contains("://")) raw else "https://$raw")
+                                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                            },
+                            modifier = Modifier.size(30.dp)
                         ) {
-                            noteUrls.forEach { urlStr ->
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .clickable {
-                                            runCatching {
-                                                val target = if (urlStr.startsWith("http")) urlStr else "https://$urlStr"
-                                                context.startActivity(
-                                                    android.content.Intent(
-                                                        android.content.Intent.ACTION_VIEW,
-                                                        android.net.Uri.parse(target)
-                                                    )
-                                                )
-                                            }
-                                        }
-                                        .padding(vertical = 2.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.Link,
-                                        contentDescription = null,
-                                        tint = c.accentBlue,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Text(
-                                        text = urlStr,
-                                        color = c.accentBlue,
-                                        fontSize = 13.sp,
-                                        maxLines = 1
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // Inline Checklist / Subtasks
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 22.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        if (task.subtasks.isNotEmpty()) {
-                            ThingsDivider(modifier = Modifier.padding(bottom = 8.dp))
-                        }
-
-                        task.subtasks.forEach { sub ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                ThingsCheckbox(
-                                    checked = sub.done,
-                                    isCircular = true,
-                                    size = 16.dp,
-                                    onCheckedChange = { vm.toggleSubtask(task.id, sub.id) }
-                                )
-                                BasicTextField(
-                                    value = sub.title,
-                                    onValueChange = { valText ->
-                                        vm.updateSubtaskTitle(task.id, sub.id, valText)
-                                    },
-                                    textStyle = TextStyle(
-                                        fontSize = 14.sp,
-                                        lineHeight = 20.sp,
-                                        textDecoration = if (sub.done) TextDecoration.LineThrough else TextDecoration.None,
-                                        color = if (sub.done) c.inkTertiary else c.inkPrimary
-                                    ),
-                                    cursorBrush = SolidColor(c.accentBlue),
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .clip(CircleShape)
-                                        .clickable { vm.deleteSubtask(task.id, sub.id) },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.Close,
-                                        contentDescription = "移除子任务",
-                                        tint = c.inkTertiary,
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        // Borderless inline add-subtask field
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 4.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier.size(34.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Add,
-                                    contentDescription = null,
-                                    tint = if (newSubtask.isNotBlank()) c.accentBlue else c.inkTertiary,
-                                    modifier = Modifier
-                                        .size(17.dp)
-                                        .clickable(enabled = newSubtask.isNotBlank()) {
-                                            vm.addSubtask(task.id, newSubtask)
-                                            newSubtask = ""
-                                        }
-                                )
-                            }
-                            BasicTextField(
-                                value = newSubtask,
-                                onValueChange = { newSubtask = it },
-                                singleLine = true,
-                                textStyle = TextStyle(color = c.inkPrimary, fontSize = 14.sp),
-                                cursorBrush = SolidColor(c.accentBlue),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                                keyboardActions = KeyboardActions(onDone = {
-                                    if (newSubtask.isNotBlank()) {
-                                        vm.addSubtask(task.id, newSubtask)
-                                        newSubtask = ""
-                                    }
-                                }),
-                                modifier = Modifier.weight(1f),
-                                decorationBox = { inner ->
-                                    if (newSubtask.isEmpty()) {
-                                        Text("添加子任务…", color = c.inkTertiary, fontSize = 14.sp)
-                                    }
-                                    inner()
-                                }
-                            )
-                        }
-                    }
-
-                    // Image Attachments (async downsampled thumbnails + tap to preview)
-                    if (task.attachments.isNotEmpty()) {
-                        ThingsDivider()
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                        ) {
-                            task.attachments.forEach { name ->
-                                val path = remember(name) { vm.assetPath(name) }
-                                val bitmap by produceState<ImageBitmap?>(initialValue = null, key1 = path) {
-                                    value = if (path.isNotBlank()) {
-                                        withContext(Dispatchers.IO) { loadDownsampledBitmap(path, 256) }
-                                    } else null
-                                }
-                                if (bitmap != null) {
-                                    Box(modifier = Modifier.size(86.dp)) {
-                                        Image(
-                                            bitmap = bitmap!!,
-                                            contentDescription = "附件图片",
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .clickable { previewPath = path }
-                                        )
-                                        Box(
-                                            modifier = Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(4.dp)
-                                                .size(20.dp)
-                                                .clip(CircleShape)
-                                                .background(Color.Black.copy(alpha = 0.58f))
-                                                .clickable { vm.removeAttachment(task.id, name) },
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                Icons.Rounded.Close,
-                                                contentDescription = "移除图片",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(13.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    ThingsDivider()
-
-                    // Bottom Metadata Strip: Due Date + Tags
-                    val dueInfo = DateUtils.dueLabel(task.dueAt, settled = task.isDone)
-                    val repeatLabel = when (task.repeatRule) {
-                        "daily" -> " · 每天"
-                        "weekly" -> " · 每周"
-                        "monthly" -> " · 每月"
-                        "yearly" -> " · 每年"
-                        else -> ""
-                    }
-                    val dueTextColor = when (dueInfo?.second) {
-                        2 -> c.danger
-                        1 -> c.todayGold
-                        else -> if (dueInfo != null) c.accentBlue else c.inkSecondary
-                    }
-                    val dueBgColor = when (dueInfo?.second) {
-                        2 -> c.dangerSoft
-                        1 -> c.todayGoldSoft
-                        else -> if (dueInfo != null) c.accentBlueSoft else c.subtleFill
-                    }
-
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        ThingsPill(
-                            text = (dueInfo?.first ?: "设置时间") + repeatLabel,
-                            textColor = dueTextColor,
-                            backgroundColor = dueBgColor,
-                            icon = Icons.Rounded.CalendarToday,
-                            onClick = { showDueSheet = true }
-                        )
-
-                        // Active tags on this task
-                        val activeTags = task.tagIds.mapNotNull { id -> tags.firstOrNull { it.id == id } }
-                        activeTags.forEach { tag ->
-                            val tagColor = TagColors.colorFor(tag.hue)
-                            ThingsPill(
-                                text = tag.label,
-                                textColor = tagColor,
-                                backgroundColor = tagColor.copy(alpha = if (c.isDark) 0.2f else 0.12f),
-                                dotColor = tagColor,
-                                onClick = { showTagPicker = !showTagPicker }
-                            )
-                        }
-
-                        if (tags.isNotEmpty()) {
-                            ThingsPill(
-                                text = if (showTagPicker) "收起标签" else "标签",
-                                textColor = c.inkSecondary,
-                                backgroundColor = c.subtleFill,
-                                icon = Icons.Rounded.Sell,
-                                onClick = { showTagPicker = !showTagPicker }
-                            )
-                        }
-                    }
-
-                    // Expandable inline tag selector
-                    if (showTagPicker && tags.isNotEmpty()) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(c.elevatedSurface)
-                                .padding(10.dp)
-                        ) {
-                            tags.forEach { tag ->
-                                val selected = task.tagIds.contains(tag.id)
-                                val tagColor = TagColors.colorFor(tag.hue)
-                                ThingsPill(
-                                    text = tag.label,
-                                    textColor = if (selected) tagColor else c.inkSecondary,
-                                    backgroundColor = if (selected) tagColor.copy(alpha = if (c.isDark) 0.22f else 0.14f) else c.cardSurface,
-                                    dotColor = tagColor,
-                                    onClick = {
-                                        vm.updateTask(task.id) { t, now ->
-                                            val next = if (selected) t.tagIds - tag.id else t.tagIds + tag.id
-                                            t.copy(tagIds = next, stamps = t.stamps + ("tagIds" to now))
-                                        }
-                                    }
-                                )
-                            }
+                            Icon(Icons.Rounded.OpenInNew, contentDescription = "打开链接", tint = c.accentBlue, modifier = Modifier.size(18.dp))
                         }
                     }
                 }
             }
 
-            // Sleek Segmented Status Control outside the main card
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = c.cardSurface,
+            // Card 2: Date/Time & Flag
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(0.6.dp, c.divider.copy(alpha = 0.8f), RoundedCornerShape(14.dp))
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(c.cardSurface)
             ) {
                 Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(5.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        .clickable { showDueSheet = true }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
                 ) {
-                    listOf("todo" to "待办", "doing" to "进行中", "done" to "已完成").forEach { (id, label) ->
-                        val active = task.status == id
+                    IconBox(Icons.Rounded.CalendarToday, c.upcomingCoral)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("日期与时间", fontSize = 15.sp, color = c.inkPrimary)
+                        val label = DateUtils.dueLabel(task.dueAt, task.isDone)?.first
+                        if (label != null) {
+                            Text(
+                                text = label + repeatLabel(task.repeatRule),
+                                fontSize = 12.5.sp,
+                                color = c.accentBlue
+                            )
+                        }
+                    }
+                    Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = c.inkTertiary)
+                }
+
+                ThingsDivider(insetStart = 54.dp)
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    IconBox(Icons.Rounded.Flag, c.todayGold)
+                    Spacer(Modifier.width(12.dp))
+                    Text("旗标", fontSize = 15.sp, color = c.inkPrimary, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = task.flagged,
+                        onCheckedChange = { vm.toggleFlag(task.id) }
+                    )
+                }
+            }
+
+            // Card 3: Priority & List Picker
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(c.cardSurface)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("优先级", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = c.inkSecondary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(0 to "无", 1 to "低 !", 2 to "中 !!", 3 to "高 !!!").forEach { (p, lbl) ->
+                        val active = task.priority == p
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(
-                                    when {
-                                        active && id == "doing" -> c.doingBlueSoft
-                                        active && id == "done" -> c.logbookGreenSoft
-                                        active -> c.subtleFill
-                                        else -> Color.Transparent
-                                    }
-                                )
-                                .clickable {
-                                    if (id == "done") {
-                                        if (!task.isDone) vm.toggleComplete(task.id)
-                                    } else {
-                                        vm.updateTask(task.id) { t, now ->
-                                            t.copy(
-                                                status = id,
-                                                completedAt = null,
-                                                stamps = t.stamps + ("status" to now) + ("completedAt" to now)
-                                            )
-                                        }
-                                    }
-                                }
-                                .padding(vertical = 10.dp),
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(if (active) c.accentBlue else c.subtleFill)
+                                .clickable { vm.setPriority(task.id, p) }
+                                .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = label,
-                                fontSize = 13.5.sp,
+                                text = lbl,
+                                fontSize = 13.sp,
                                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-                                color = when {
-                                    active && id == "doing" -> c.doingBlue
-                                    active && id == "done" -> c.logbookGreen
-                                    active -> c.inkPrimary
-                                    else -> c.inkSecondary
+                                color = if (active) Color.White else c.inkPrimary
+                            )
+                        }
+                    }
+                }
+
+                ThingsDivider()
+
+                Text("列表", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = c.inkSecondary)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    lists.forEach { list ->
+                        val active = task.effectiveListId == list.id
+                        val lColor = ListStyle.colorFor(list.color)
+                        ThingsPill(
+                            text = list.name,
+                            textColor = if (active) Color.White else c.inkPrimary,
+                            backgroundColor = if (active) lColor else c.subtleFill,
+                            dotColor = if (active) Color.White else lColor,
+                            onClick = { vm.moveTaskToList(task.id, list.id) }
+                        )
+                    }
+                }
+            }
+
+            // Card 4: Tags
+            if (tags.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(c.cardSurface)
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("标签", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = c.inkSecondary)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        tags.forEach { tag ->
+                            val on = task.tagIds.contains(tag.id)
+                            val col = TagColors.colorFor(tag.hue)
+                            ThingsPill(
+                                text = "#${tag.label}",
+                                textColor = if (on) Color.White else col,
+                                backgroundColor = if (on) col else col.copy(alpha = 0.14f),
+                                onClick = {
+                                    vm.updateTask(task.id) { cur, now ->
+                                        val next = if (cur.tagIds.contains(tag.id)) cur.tagIds - tag.id else cur.tagIds + tag.id
+                                        cur.copy(tagIds = next, stamps = cur.stamps + ("tagIds" to now))
+                                    }
                                 }
                             )
                         }
@@ -595,7 +333,163 @@ fun TaskDetailScreen(
                 }
             }
 
-            Spacer(Modifier.height(36.dp))
+            // Card 5: Subtasks
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(c.cardSurface)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("子任务", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = c.inkSecondary)
+                    if (task.checklistTotal > 0) {
+                        Spacer(Modifier.width(6.dp))
+                        Text("${task.checklistDone}/${task.checklistTotal}", fontSize = 12.sp, color = c.inkTertiary)
+                    }
+                }
+
+                task.subtasks.forEach { st ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        ThingsCheckbox(
+                            checked = st.done,
+                            size = 18.dp,
+                            onCheckedChange = { vm.toggleSubtask(task.id, st.id) }
+                        )
+                        Text(
+                            text = st.title,
+                            fontSize = 14.5.sp,
+                            color = if (st.done) c.inkSecondary else c.inkPrimary,
+                            textDecoration = if (st.done) TextDecoration.LineThrough else TextDecoration.None,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { vm.deleteSubtask(task.id, st.id) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Rounded.Close, contentDescription = "删除子任务", tint = c.inkTertiary, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Rounded.Add, contentDescription = null, tint = c.accentBlue, modifier = Modifier.size(18.dp))
+                    BasicTextField(
+                        value = newSubtask,
+                        onValueChange = { newSubtask = it },
+                        singleLine = true,
+                        textStyle = TextStyle(color = c.inkPrimary, fontSize = 14.5.sp),
+                        cursorBrush = SolidColor(c.accentBlue),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = {
+                            if (newSubtask.isNotBlank()) {
+                                vm.addSubtask(task.id, newSubtask)
+                                newSubtask = ""
+                            }
+                        }),
+                        modifier = Modifier.weight(1f),
+                        decorationBox = { inner ->
+                            if (newSubtask.isEmpty()) Text("添加子任务…", color = c.inkTertiary, fontSize = 14.5.sp)
+                            inner()
+                        }
+                    )
+                    if (newSubtask.isNotBlank()) {
+                        Text(
+                            text = "添加",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = c.accentBlue,
+                            modifier = Modifier.clickable {
+                                vm.addSubtask(task.id, newSubtask)
+                                newSubtask = ""
+                            }
+                        )
+                    }
+                }
+            }
+
+            // Card 6: Images
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(c.cardSurface)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }
+                ) {
+                    Icon(Icons.Rounded.AddPhotoAlternate, contentDescription = null, tint = c.accentBlue, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("添加图像…", fontSize = 15.sp, color = c.accentBlue, fontWeight = FontWeight.Medium)
+                }
+
+                if (task.attachments.isNotEmpty()) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(task.attachments, key = { it }) { name ->
+                            val path = remember(name) { vm.assetPath(name) }
+                            val bmp by produceState<android.graphics.Bitmap?>(initialValue = null, path) {
+                                value = withContext(Dispatchers.IO) {
+                                    if (path.isNotBlank() && File(path).exists()) BitmapFactory.decodeFile(path) else null
+                                }
+                            }
+                            Box(modifier = Modifier.size(72.dp)) {
+                                if (bmp != null) {
+                                    Image(
+                                        bitmap = bmp!!.asImageBitmap(),
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable { previewFile = path }
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .size(20.dp)
+                                        .clip(CircleShape)
+                                        .background(Color.Black.copy(alpha = 0.6f))
+                                        .clickable { vm.removeAttachment(task.id, name) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "删除图片", tint = Color.White, modifier = Modifier.size(13.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Delete Button
+            Button(
+                onClick = {
+                    vm.deleteTask(task.id)
+                    onDismiss()
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = c.dangerSoft,
+                    contentColor = c.danger
+                ),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(46.dp)
+            ) {
+                Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("删除提醒事项", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+
+            Spacer(Modifier.height(12.dp))
         }
     }
 
@@ -604,11 +498,11 @@ fun TaskDetailScreen(
             currentDue = task.dueAt,
             currentRepeat = task.repeatRule,
             onApply = { newDue, newRepeat ->
-                vm.updateTask(task.id) { t, now ->
-                    t.copy(
+                vm.updateTask(task.id) { cur, now ->
+                    cur.copy(
                         dueAt = newDue,
-                        repeatRule = if (newDue.isNullOrBlank()) null else newRepeat,
-                        stamps = t.stamps + ("dueAt" to now) + ("repeatRule" to now)
+                        repeatRule = if (newDue == null) null else newRepeat,
+                        stamps = cur.stamps + ("dueAt" to now) + ("repeatRule" to now)
                     )
                 }
             },
@@ -616,72 +510,31 @@ fun TaskDetailScreen(
         )
     }
 
-    previewPath?.let { path ->
-        val fullBitmap by produceState<ImageBitmap?>(initialValue = null, key1 = path) {
-            value = withContext(Dispatchers.IO) { loadDownsampledBitmap(path, 1600) }
-        }
-        Dialog(
-            onDismissRequest = { previewPath = null },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.92f))
-                    .clickable { previewPath = null },
-                contentAlignment = Alignment.Center
-            ) {
-                fullBitmap?.let { bmp ->
-                    Image(
-                        bitmap = bmp,
-                        contentDescription = "大图预览",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                    )
-                }
-                IconButton(
-                    onClick = { previewPath = null },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .statusBarsPadding()
-                        .padding(12.dp)
-                ) {
-                    Icon(
-                        Icons.Rounded.Close,
-                        contentDescription = "关闭预览",
-                        tint = Color.White
-                    )
-                }
-            }
-        }
+    previewFile?.let { path ->
+        com.lele.navigator.ui.components.ZoomableImageDialog(
+            imagePath = path,
+            onDismiss = { previewFile = null }
+        )
     }
 }
 
-private fun loadDownsampledBitmap(path: String, reqSizePx: Int): ImageBitmap? {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeFile(path, bounds)
-    val w = bounds.outWidth
-    val h = bounds.outHeight
-    if (w <= 0 || h <= 0) return null
-    var sampleSize = 1
-    while (w / (sampleSize * 2) >= reqSizePx || h / (sampleSize * 2) >= reqSizePx) {
-        sampleSize *= 2
+@Composable
+private fun IconBox(icon: androidx.compose.ui.graphics.vector.ImageVector, bg: Color) {
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(bg),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
     }
-    val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-    return BitmapFactory.decodeFile(path, opts)?.asImageBitmap()
 }
 
-private fun extractUrlsFromText(text: String): List<String> {
-    if (text.isBlank()) return emptyList()
-    val matcher = android.util.Patterns.WEB_URL.matcher(text)
-    val seen = LinkedHashSet<String>()
-    while (matcher.find()) {
-        val raw = matcher.group() ?: continue
-        if (raw.contains(".")) {
-            seen.add(raw)
-        }
-    }
-    return seen.toList()
+private fun repeatLabel(rule: String?): String = when (rule) {
+    "daily" -> " · 每天"
+    "weekly" -> " · 每周"
+    "monthly" -> " · 每月"
+    "yearly" -> " · 每年"
+    else -> ""
 }

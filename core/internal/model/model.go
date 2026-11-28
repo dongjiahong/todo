@@ -6,8 +6,11 @@ import (
 	"time"
 )
 
-// Status represents a task's lifecycle state.
-// Completed tasks automatically live in the Logbook rather than occupying permanent board columns.
+// DefaultListID is the fallback list ID assigned to tasks without an explicit list.
+const DefaultListID = "list_reminders"
+
+// Status represents a task's completion state (Apple Reminders model: active vs completed).
+// StatusDoing is retained only for backward-compatible migration to Flagged=true.
 type Status string
 
 const (
@@ -46,12 +49,37 @@ type Subtask struct {
 	Order int    `json:"order"`
 }
 
+// TaskList represents a user-defined Reminder list (e.g., 工作, 学习, 生活, 提醒).
+type TaskList struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Color     string `json:"color"` // "blue"|"orange"|"green"|"red"|"purple"|"pink"|"yellow"|"gray"
+	Icon      string `json:"icon"`  // "list"|"work"|"study"|"life"|"home"|"cart"|"star"|"book"|"code"|"heart"
+	Order     int    `json:"order"`
+	UpdatedAt int64  `json:"updatedAt"`
+	Deleted   bool   `json:"deleted,omitempty"`
+}
+
+// Normalize ensures valid defaults on a TaskList.
+func (l *TaskList) Normalize() {
+	if l.Color == "" {
+		l.Color = "blue"
+	}
+	if l.Icon == "" {
+		l.Icon = "list"
+	}
+}
+
 // Task is the core domain entity synchronized across macOS and Android.
 type Task struct {
 	ID          string           `json:"id"`
 	Title       string           `json:"title"`
 	Notes       string           `json:"notes"`
 	Status      Status           `json:"status"`
+	ListID      string           `json:"listId,omitempty"`
+	Flagged     bool             `json:"flagged,omitempty"`
+	Priority    int              `json:"priority,omitempty"` // 0=none, 1=low, 2=medium, 3=high
+	URL         string           `json:"url,omitempty"`
 	Subtasks    []Subtask        `json:"subtasks"`
 	TagIDs      []string         `json:"tagIds"`
 	DueAt       string           `json:"dueAt,omitempty"`       // Local "YYYY-MM-DDTHH:mm"
@@ -77,9 +105,10 @@ type Tag struct {
 
 // BoardState is the full snapshot loaded by native clients.
 type BoardState struct {
-	Tasks  []Task `json:"tasks"`
-	Tags   []Tag  `json:"tags"`
-	Seeded bool   `json:"seeded"`
+	Tasks  []Task     `json:"tasks"`
+	Tags   []Tag      `json:"tags"`
+	Lists  []TaskList `json:"lists"`
+	Seeded bool       `json:"seeded"`
 }
 
 // PeerStatus describes one LAN peer's sync health.
@@ -109,14 +138,27 @@ type SyncEvent struct {
 	Type   string      `json:"type"` // "rows" | "status"
 	Tasks  []Task      `json:"tasks,omitempty"`
 	Tags   []Tag       `json:"tags,omitempty"`
+	Lists  []TaskList  `json:"lists,omitempty"`
 	Status *SyncStatus `json:"status,omitempty"`
 	At     int64       `json:"at,omitempty"`
 }
 
 // Normalize ensures non-nil slices and valid defaults before serialization.
 func (t *Task) Normalize() {
+	if t.Status == StatusDoing {
+		t.Status = StatusTodo
+		t.Flagged = true
+	}
 	if t.Status == "" {
 		t.Status = StatusTodo
+	}
+	if t.ListID == "" {
+		t.ListID = DefaultListID
+	}
+	if t.Priority < 0 {
+		t.Priority = 0
+	} else if t.Priority > 3 {
+		t.Priority = 3
 	}
 	if t.Subtasks == nil {
 		t.Subtasks = []Subtask{}
@@ -159,7 +201,7 @@ func MergeTask(a, b Task) Task {
 	if b.UpdatedAt > a.UpdatedAt {
 		res = b
 	}
-	res.Stamps = make(map[string]int64, 12)
+	res.Stamps = make(map[string]int64, 16)
 	newest := max(a.UpdatedAt, b.UpdatedAt)
 	if a.CreatedAt > 0 && (b.CreatedAt == 0 || a.CreatedAt < b.CreatedAt) {
 		res.CreatedAt = a.CreatedAt
@@ -187,6 +229,10 @@ func MergeTask(a, b Task) Task {
 	pick("title", a.Title, b.Title, func() { res.Title = a.Title }, func() { res.Title = b.Title })
 	pick("notes", a.Notes, b.Notes, func() { res.Notes = a.Notes }, func() { res.Notes = b.Notes })
 	pick("status", a.Status, b.Status, func() { res.Status = a.Status }, func() { res.Status = b.Status })
+	pick("listId", a.ListID, b.ListID, func() { res.ListID = a.ListID }, func() { res.ListID = b.ListID })
+	pick("flagged", a.Flagged, b.Flagged, func() { res.Flagged = a.Flagged }, func() { res.Flagged = b.Flagged })
+	pick("priority", a.Priority, b.Priority, func() { res.Priority = a.Priority }, func() { res.Priority = b.Priority })
+	pick("url", a.URL, b.URL, func() { res.URL = a.URL }, func() { res.URL = b.URL })
 	pick("subtasks", a.Subtasks, b.Subtasks, func() { res.Subtasks = a.Subtasks }, func() { res.Subtasks = b.Subtasks })
 	pick("tagIds", a.TagIDs, b.TagIDs, func() { res.TagIDs = a.TagIDs }, func() { res.TagIDs = b.TagIDs })
 	pick("dueAt", a.DueAt, b.DueAt, func() { res.DueAt = a.DueAt }, func() { res.DueAt = b.DueAt })
@@ -203,6 +249,22 @@ func MergeTask(a, b Task) Task {
 
 // MergeTag reconciles two copies of a tag by UpdatedAt (deterministic tie-break).
 func MergeTag(a, b Tag) Tag {
+	if b.UpdatedAt > a.UpdatedAt {
+		return b
+	}
+	if a.UpdatedAt > b.UpdatedAt {
+		return a
+	}
+	if tieWins(a, b) {
+		return a
+	}
+	return b
+}
+
+// MergeList reconciles two copies of a TaskList by UpdatedAt (deterministic tie-break).
+func MergeList(a, b TaskList) TaskList {
+	a.Normalize()
+	b.Normalize()
 	if b.UpdatedAt > a.UpdatedAt {
 		return b
 	}
@@ -252,39 +314,22 @@ func addMonthsClamped(t time.Time, months int) time.Time {
 	return time.Date(newYear, newMonth, day, t.Hour(), t.Minute(), 0, 0, t.Location())
 }
 
-// SortTasks orders active tasks by due date first (nearest/overdue at top), then by rank.
+// SortTasks orders active tasks by Rank then CreatedAt ascending (so new items append above the phantom row).
 // Completed tasks are sorted newest completedAt first.
 func SortTasks(tasks []Task) {
-	statusRank := func(s Status) int {
-		switch s {
-		case StatusDoing:
-			return 0
-		case StatusTodo:
-			return 1
-		case StatusDone:
-			return 2
-		default:
-			return 3
-		}
-	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		a, b := tasks[i], tasks[j]
-		sa, sb := statusRank(a.Status), statusRank(b.Status)
-		if sa != sb {
-			return sa < sb
+		aDone := a.Status == StatusDone
+		bDone := b.Status == StatusDone
+		if aDone != bDone {
+			return !aDone
 		}
-		if a.Status == StatusDone {
+		if aDone {
 			return a.CompletedAt > b.CompletedAt
-		}
-		if a.DueAt != "" && b.DueAt != "" && a.DueAt != b.DueAt {
-			return a.DueAt < b.DueAt
-		}
-		if (a.DueAt != "") != (b.DueAt != "") {
-			return a.DueAt != ""
 		}
 		if a.Rank != b.Rank {
 			return a.Rank < b.Rank
 		}
-		return a.CreatedAt > b.CreatedAt
+		return a.CreatedAt < b.CreatedAt
 	})
 }

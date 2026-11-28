@@ -8,13 +8,13 @@ struct NavigatorApp: App {
     var body: some Scene {
         WindowGroup("TODO") {
             ContentView(store: store)
-                .frame(minWidth: 880, minHeight: 560)
+                .frame(minWidth: 740, minHeight: 520)
                 .preferredColorScheme(store.appearance.colorScheme)
                 .onAppear {
                     store.bootstrap()
                 }
         }
-        .windowStyle(.automatic)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("设置…") {
@@ -23,12 +23,17 @@ struct NavigatorApp: App {
                 .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(replacing: .newItem) {
-                Button("新建任务") {
-                    store.showQuickCapture = true
+                Button("新建提醒事项") {
+                    _ = store.createInlineTask()
                 }
                 .keyboardShortcut("n", modifiers: .command)
 
-                Button("全局搜索") {
+                Button("新建列表…") {
+                    store.showAddListSheet = true
+                }
+                .keyboardShortcut("l", modifiers: .command)
+
+                Button("搜索") {
                     store.focusSearchTrigger += 1
                 }
                 .keyboardShortcut("f", modifiers: .command)
@@ -39,6 +44,19 @@ struct NavigatorApp: App {
                 .keyboardShortcut("k", modifiers: .command)
 
                 Divider()
+
+                Button("粘贴图片到当前提醒") {
+                    guard let id = store.editingTaskID ?? store.inspectorTaskID else { return }
+                    let pb = NSPasteboard.general
+                    if let png = pb.data(forType: .png) {
+                        store.attachImage(to: id, data: png, ext: "png")
+                    } else if let tiff = pb.data(forType: .tiff),
+                              let rep = NSBitmapImageRep(data: tiff),
+                              let png = rep.representation(using: .png, properties: [:]) {
+                        store.attachImage(to: id, data: png, ext: "png")
+                    }
+                }
+                .keyboardShortcut("v", modifiers: [.command, .shift])
 
                 Button("导出为 Markdown（复制到剪贴板）") {
                     store.copyMarkdownExport()
@@ -51,57 +69,14 @@ struct NavigatorApp: App {
 
 struct ContentView: View {
     @Bindable var store: NavigatorStore
-    @State private var showTodayCompleted = false
-    @FocusState private var searchFocused: Bool
 
     var body: some View {
         NavigationSplitView {
             SidebarView(store: store)
-                .navigationSplitViewColumnWidth(min: 195, ideal: 215, max: 250)
-        } content: {
-            VStack(spacing: 0) {
-                inlineSearchBar
-                Divider()
-                mainWorkspace
-            }
-            .navigationSplitViewColumnWidth(min: 360, ideal: 500)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 255)
         } detail: {
-            if let id = store.selectedTaskID {
-                TaskDetailView(taskID: id, store: store)
-                    .id(id)
-            } else {
-                VStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.tertiary)
-                    Text("选择任务查看详情，或按 ⌘N 快速新建")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .onChange(of: store.focusSearchTrigger) { _, _ in
-            searchFocused = true
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if store.section != .logbook && !store.isSearching {
-                    Picker("视图", selection: $store.viewMode) {
-                        Image(systemName: "list.bullet").tag(ViewMode.list)
-                        Image(systemName: "rectangle.split.2x1").tag(ViewMode.board)
-                    }
-                    .pickerStyle(.segmented)
-                    .help("切换聚焦列表 / 精简双列看板")
-                }
-
-                Button {
-                    store.showQuickCapture = true
-                } label: {
-                    Label("新建任务", systemImage: "plus")
-                }
-                .help("新建任务 (⌘N)")
-            }
+            mainDetailArea
+                .background(Color(nsColor: .textBackgroundColor))
         }
         .overlay(alignment: .bottom) {
             if let undo = store.undoBanner {
@@ -130,8 +105,11 @@ struct ContentView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .sheet(isPresented: $store.showQuickCapture) {
-            QuickCaptureView(store: store)
+        .sheet(isPresented: $store.showAddListSheet) {
+            AddListSheet(store: store, editing: nil)
+        }
+        .sheet(item: $store.editingList) { list in
+            AddListSheet(store: store, editing: list)
         }
         .sheet(isPresented: $store.showTagManager) {
             TagManagerView(store: store)
@@ -147,297 +125,323 @@ struct ContentView: View {
             set: { if !$0 { store.previewImagePath = nil } }
         )) {
             if let path = store.previewImagePath, let img = NSImage(contentsOfFile: path) {
-                VStack {
-                    Image(nsImage: img)
-                        .resizable()
-                        .scaledToFit()
-                        .padding(16)
-                    Button("关闭") { store.previewImagePath = nil }
-                        .padding(.bottom, 12)
+                ImageLightboxView(image: img, filePath: path) {
+                    store.previewImagePath = nil
                 }
-                .frame(minWidth: 520, minHeight: 420)
             }
         }
     }
 
-    private var inlineSearchBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 12.5))
-                .foregroundStyle(searchFocused ? Color.accentColor : .secondary)
-
-            TextField("全局搜索标题、备注、子任务或标签…", text: $store.searchQuery)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .focused($searchFocused)
-                .onExitCommand {
-                    store.searchQuery = ""
-                    searchFocused = false
-                }
-
-            if store.isSearching {
-                Text("\(store.globalSearchResults.count) 条结果")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-
-                Button {
-                    store.searchQuery = ""
-                    searchFocused = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("清空搜索")
-            } else {
-                Text("⌘F")
-                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
-    }
+    // MARK: - Main Right Pane (Apple Reminders style)
 
     @ViewBuilder
-    private var mainWorkspace: some View {
-        if store.isSearching {
-            globalSearchView
-                .navigationTitle("搜索结果")
-        } else if store.viewMode == .board && store.section != .logbook {
-            BoardView(store: store)
-                .navigationTitle("精简看板")
-        } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    listBigHeader
-                    switch store.section {
-                    case .today:
-                        todayView
-                    case .doing:
-                        flatSection(title: "进行中", tasks: store.doingTasks, empty: "当前没有进行中的任务")
-                    case .todo:
-                        flatSection(title: "待办", tasks: store.todoTasks, empty: "待办已清空，按 ⌘N 记一笔")
-                    case .upcoming:
-                        upcomingView
-                    case .logbook:
-                        logbookView
-                    case .tag(let tagID):
-                        let name = store.liveTags.first(where: { $0.id == tagID })?.label ?? "标签"
-                        flatSection(title: name, tasks: store.tasksForTag(tagID), empty: "该标签下暂无未完成任务")
+    private var mainDetailArea: some View {
+        VStack(spacing: 0) {
+            // Compact top-right "+" button bar
+            HStack {
+                Spacer()
+                if !store.isSearching && store.section != .completed {
+                    Button {
+                        _ = store.createInlineTask()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("新建提醒事项 (⌘N)")
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 5)
+
+            // Compact Colored Header Title + Count
+            HStack(alignment: .firstTextBaseline) {
+                Text(store.isSearching ? "搜索「\(store.searchQuery)」" : sectionTitle)
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(store.isSearching ? .primary : sectionTitleColor)
+
+                Spacer()
+
+                if !store.isSearching, let rightCount = headerRightCount {
+                    Text("\(rightCount)")
+                        .font(.system(size: 22, weight: .regular, design: .rounded))
+                        .foregroundStyle(sectionTitleColor.opacity(0.85))
+                        .monospacedDigit()
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 5)
+
+            // Completed Counter Bar ("N 项完成 • 清除" | "显示 / 隐藏")
+            if !store.isSearching && (store.completedCountForCurrentSection > 0 || store.section == .completed) {
+                HStack(spacing: 5) {
+                    Text("\(store.completedCountForCurrentSection) 项完成")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+
+                    if store.completedCountForCurrentSection > 0 {
+                        Text("•")
+                            .foregroundStyle(.tertiary)
+                        Button("清除") {
+                            store.clearCompletedForCurrentSection()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    if store.section != .completed && store.completedCountForCurrentSection > 0 {
+                        Button(store.showCompletedInSection ? "隐藏" : "显示") {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                store.showCompletedInSection.toggle()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-            }
-            .navigationTitle(sectionTitle)
-        }
-    }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
 
-    @ViewBuilder
-    private var listBigHeader: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
-                if let icon = sectionIcon {
-                    Image(systemName: icon)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(sectionTint)
-                } else if case .tag(let tagID) = store.section,
-                          let tag = store.liveTags.first(where: { $0.id == tagID }) {
-                    Circle()
-                        .fill(tag.hue.color)
-                        .frame(width: 11, height: 11)
+                Divider()
+                    .padding(.horizontal, 16)
+            } else {
+                Divider()
+                    .padding(.horizontal, 16)
+            }
+
+            // Main Scrollable Reminder Stream
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if store.isSearching {
+                        searchResultsStream
+                    } else {
+                        switch store.section {
+                        case .all:
+                            allGroupedStream
+                        case .today:
+                            flatStream(tasks: store.todayTasks, listID: nil, accent: NavTheme.accentBlue, showListBadge: true)
+                        case .scheduled:
+                            scheduledStream
+                        case .flagged:
+                            flatStream(tasks: store.flaggedTasks, listID: nil, accent: NavTheme.flaggedOrange, showListBadge: true)
+                        case .completed:
+                            completedStream
+                        case .list(let listID):
+                            let list = store.list(for: listID)
+                            flatStream(tasks: store.activeTasks(in: listID), listID: listID, accent: list.swiftUIColor, showListBadge: false)
+                        case .allTags:
+                            flatStream(tasks: store.allTaggedActiveTasks(), listID: nil, accent: NavTheme.accentBlue, showListBadge: true)
+                        case .tag(let tagID):
+                            let tagColor = store.liveTags.first(where: { $0.id == tagID })?.hue.color ?? NavTheme.accentBlue
+                            flatStream(tasks: store.activeTasks(forTag: tagID), listID: nil, accent: tagColor, showListBadge: true)
+                        }
+
+                        if store.section != .completed && store.showCompletedInSection {
+                            let doneItems = store.completedTasksForCurrentSection
+                            if !doneItems.isEmpty {
+                                Text("已完成")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 16)
+                                    .padding(.bottom, 4)
+                                ForEach(doneItems) { task in
+                                    TaskRowView(
+                                        task: task,
+                                        store: store,
+                                        accentTint: store.list(for: task.effectiveListID).swiftUIColor,
+                                        showListBadge: store.section != .list(task.effectiveListID)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
-                Text(sectionTitle)
-                    .font(.system(size: 22, weight: .bold))
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                .padding(.bottom, 32)
             }
-            if store.section == .today {
-                Text(DateHelper.todaySubtitle())
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 26)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.top, 2)
-        .padding(.bottom, 8)
-    }
-
-    private var sectionIcon: String? {
-        switch store.section {
-        case .today: return "star.fill"
-        case .doing: return "flame.fill"
-        case .todo: return "tray.fill"
-        case .upcoming: return "calendar"
-        case .logbook: return "book.closed.fill"
-        case .tag: return nil
         }
     }
 
-    private var sectionTint: Color {
-        switch store.section {
-        case .today: return NavTheme.todayGold
-        case .doing: return NavTheme.doingBlue
-        case .todo: return NavTheme.inboxBlue
-        case .upcoming: return NavTheme.upcomingCoral
-        case .logbook: return NavTheme.logbookGreen
-        case .tag: return NavTheme.accentBlue
+    // MARK: - Section Streams
+
+    @ViewBuilder
+    private var allGroupedStream: some View {
+        ForEach(store.liveLists) { list in
+            let listTasks = store.activeTasks(in: list.id)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(list.name)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(list.swiftUIColor)
+                    .padding(.top, 10)
+                    .padding(.bottom, 2)
+
+                ForEach(listTasks) { task in
+                    TaskRowView(task: task, store: store, accentTint: list.swiftUIColor, showListBadge: false)
+                }
+
+                PhantomTaskRow {
+                    _ = store.createInlineTask(in: list.id)
+                }
+
+                Divider()
+                    .padding(.top, 2)
+            }
         }
     }
 
     @ViewBuilder
-    private var upcomingView: some View {
-        let items = store.upcomingTasks
+    private var scheduledStream: some View {
+        let items = store.scheduledTasks
         let grouped = Dictionary(grouping: items) { DateHelper.upcomingGroupTitle(for: $0.dueAt) }
         let orderedKeys = items.reduce(into: [String]()) { acc, item in
             let k = DateHelper.upcomingGroupTitle(for: item.dueAt)
             if !acc.contains(k) { acc.append(k) }
         }
         if orderedKeys.isEmpty {
-            emptyState("没有设置了截止时间的任务")
+            PhantomTaskRow {
+                _ = store.createInlineTask(dueAt: DateHelper.presetDate(daysOffset: 0, hour: 18))
+            }
         } else {
             ForEach(orderedKeys, id: \.self) { day in
-                sectionHeader(day, count: grouped[day]?.count ?? 0, tint: day == "已逾期" ? NavTheme.danger : .secondary)
-                ForEach(grouped[day] ?? []) { task in row(task) }
-            }
-        }
-    }
+                Text(day)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(day == "已逾期" ? NavTheme.danger : .primary)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
 
-    @ViewBuilder
-    private var globalSearchView: some View {
-        let all = store.globalSearchResults
-        let doing = all.filter { $0.status == .doing }
-        let todo = all.filter { $0.status == .todo }
-        let done = all.filter { $0.status == .done }
-
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 6) {
-                if all.isEmpty {
-                    emptyState("没有找到匹配「\(store.searchQuery)」的任务")
-                } else {
-                    if !doing.isEmpty {
-                        sectionHeader("进行中", count: doing.count, tint: NavTheme.doingBlue)
-                        ForEach(doing) { task in row(task) }
-                    }
-                    if !todo.isEmpty {
-                        sectionHeader("待办", count: todo.count, tint: .primary)
-                        ForEach(todo) { task in row(task) }
-                    }
-                    if !done.isEmpty {
-                        sectionHeader("日志簿（已完成）", count: done.count, tint: .secondary)
-                        ForEach(done) { task in row(task) }
-                    }
+                ForEach(grouped[day] ?? []) { task in
+                    TaskRowView(
+                        task: task,
+                        store: store,
+                        accentTint: store.list(for: task.effectiveListID).swiftUIColor,
+                        showListBadge: true
+                    )
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-        }
-    }
-
-    @ViewBuilder
-    private var todayView: some View {
-        if !store.todayOverdueTasks.isEmpty {
-            sectionHeader("已逾期", count: store.todayOverdueTasks.count, tint: NavTheme.danger)
-            ForEach(store.todayOverdueTasks) { task in row(task) }
-        }
-
-        sectionHeader("今日聚焦", count: store.todayActiveTasks.count, tint: .primary)
-        if store.todayActiveTasks.isEmpty && store.todayOverdueTasks.isEmpty {
-            emptyState("今天很清静，没有待处理事项")
-        } else {
-            ForEach(store.todayActiveTasks) { task in row(task) }
-        }
-
-        if !store.todayCompletedTasks.isEmpty {
-            DisclosureGroup(isExpanded: $showTodayCompleted) {
-                ForEach(store.todayCompletedTasks) { task in row(task) }
-            } label: {
-                Text("今日已完成 \(store.todayCompletedTasks.count)")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
+            PhantomTaskRow {
+                _ = store.createInlineTask(dueAt: DateHelper.presetDate(daysOffset: 0, hour: 18))
             }
-            .padding(.top, 14)
-            .padding(.horizontal, 8)
         }
     }
 
     @ViewBuilder
-    private var logbookView: some View {
-        let grouped = Dictionary(grouping: store.logbookTasks) {
-            DateHelper.logbookGroupTitle(for: $0.completedAt)
-        }
-        let orderedKeys = store.logbookTasks.reduce(into: [String]()) { acc, item in
+    private var completedStream: some View {
+        let items = store.completedTasks
+        let grouped = Dictionary(grouping: items) { DateHelper.logbookGroupTitle(for: $0.completedAt) }
+        let orderedKeys = items.reduce(into: [String]()) { acc, item in
             let k = DateHelper.logbookGroupTitle(for: item.completedAt)
             if !acc.contains(k) { acc.append(k) }
         }
         if orderedKeys.isEmpty {
-            emptyState("日志簿还是空的，完成的任务会自动记录在这里")
+            Text("暂无已完成的提醒事项")
+                .font(.system(size: 13))
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 60)
         } else {
             ForEach(orderedKeys, id: \.self) { day in
-                sectionHeader(day, count: grouped[day]?.count ?? 0, tint: .secondary)
-                ForEach(grouped[day] ?? []) { task in row(task) }
+                Text(day)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
+
+                ForEach(grouped[day] ?? []) { task in
+                    TaskRowView(
+                        task: task,
+                        store: store,
+                        accentTint: store.list(for: task.effectiveListID).swiftUIColor,
+                        showListBadge: true
+                    )
+                }
             }
         }
     }
 
     @ViewBuilder
-    private func flatSection(title: String, tasks: [TaskItem], empty: String) -> some View {
-        if tasks.isEmpty {
-            emptyState(empty)
-        } else {
-            ForEach(tasks) { task in row(task) }
+    private func flatStream(tasks: [TaskItem], listID: String?, accent: Color, showListBadge: Bool) -> some View {
+        ForEach(tasks) { task in
+            TaskRowView(
+                task: task,
+                store: store,
+                accentTint: listID == nil ? store.list(for: task.effectiveListID).swiftUIColor : accent,
+                showListBadge: showListBadge
+            )
+        }
+        PhantomTaskRow {
+            _ = store.createInlineTask(in: listID)
         }
     }
 
-    private func row(_ task: TaskItem) -> some View {
-        TaskRowView(
-            task: task,
-            tags: store.liveTags,
-            isSelected: store.selectedTaskID == task.id,
-            onSelect: { store.selectedTaskID = task.id },
-            onToggleComplete: { store.toggleComplete(id: task.id) },
-            onToggleDoing: { store.moveTask(id: task.id, to: task.status == .doing ? .todo : .doing) },
-            onDelete: { store.deleteTask(id: task.id) }
-        )
-    }
-
-    private func sectionHeader(_ title: String, count: Int, tint: Color) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(tint)
-            Text("\(count)")
-                .font(.system(size: 11, weight: .medium))
+    @ViewBuilder
+    private var searchResultsStream: some View {
+        let results = store.globalSearchResults
+        if results.isEmpty {
+            Text("没有找到匹配「\(store.searchQuery)」的提醒事项")
+                .font(.system(size: 13))
                 .foregroundStyle(.tertiary)
-                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 60)
+        } else {
+            ForEach(results) { task in
+                TaskRowView(
+                    task: task,
+                    store: store,
+                    accentTint: store.list(for: task.effectiveListID).swiftUIColor,
+                    showListBadge: true
+                )
+            }
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 10)
-        .padding(.bottom, 2)
     }
 
-    private func emptyState(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 13))
-            .foregroundStyle(.tertiary)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.top, 48)
-    }
+    // MARK: - Section Metadata
 
     private var sectionTitle: String {
         switch store.section {
         case .today: return "今天"
-        case .doing: return "进行中"
-        case .todo: return "待办"
-        case .upcoming: return "计划"
-        case .logbook: return "日志簿"
-        case .tag(let id): return store.liveTags.first(where: { $0.id == id })?.label ?? "标签"
+        case .scheduled: return "计划"
+        case .all: return "全部"
+        case .flagged: return "旗标"
+        case .completed: return "完成"
+        case .list(let id): return store.list(for: id).name
+        case .allTags: return "所有标签"
+        case .tag(let id):
+            let lbl = store.liveTags.first(where: { $0.id == id })?.label ?? "标签"
+            return "#\(lbl)"
+        }
+    }
+
+    private var sectionTitleColor: Color {
+        switch store.section {
+        case .today: return NavTheme.accentBlue
+        case .scheduled: return NavTheme.scheduledRed
+        case .all: return .primary
+        case .flagged: return NavTheme.flaggedOrange
+        case .completed: return NavTheme.completedGray
+        case .list(let id): return store.list(for: id).swiftUIColor
+        case .allTags: return .primary
+        case .tag(let id): return store.liveTags.first(where: { $0.id == id })?.hue.color ?? NavTheme.accentBlue
+        }
+    }
+
+    private var headerRightCount: Int? {
+        switch store.section {
+        case .all, .completed: return nil
+        case .today: return store.todayCount
+        case .scheduled: return store.scheduledCount
+        case .flagged: return store.flaggedCount
+        case .list(let id): return store.activeTasks(in: id).count
+        case .allTags: return store.allTaggedActiveTasks().count
+        case .tag(let id): return store.activeTasks(forTag: id).count
         }
     }
 }
@@ -463,13 +467,13 @@ struct CommandPaletteView: View {
     private var entries: [PaletteEntry] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var list: [PaletteEntry] = [
-            PaletteEntry(id: "cmd_new", title: "新建任务", icon: "plus.circle", shortcut: "⌘N", group: "快捷操作") {
+            PaletteEntry(id: "cmd_new", title: "新建提醒事项", icon: "plus.circle", shortcut: "⌘N", group: "快捷操作") {
                 store.showCommandPalette = false
-                store.showQuickCapture = true
+                _ = store.createInlineTask()
             },
-            PaletteEntry(id: "cmd_board", title: "切换列表 / 双列看板", icon: "rectangle.split.2x1", shortcut: "", group: "快捷操作") {
-                store.viewMode = store.viewMode == .list ? .board : .list
+            PaletteEntry(id: "cmd_new_list", title: "添加新列表", icon: "folder.badge.plus", shortcut: "⌘L", group: "快捷操作") {
                 store.showCommandPalette = false
+                store.showAddListSheet = true
             },
             PaletteEntry(id: "cmd_settings", title: "打开设置（含局域网同步）", icon: "gearshape", shortcut: "⌘,", group: "快捷操作") {
                 store.showCommandPalette = false
@@ -489,12 +493,13 @@ struct CommandPaletteView: View {
         for task in tasks {
             list.append(PaletteEntry(
                 id: "task_\(task.id)",
-                title: task.title.isEmpty ? "未命名任务" : task.title,
+                title: task.title.isEmpty ? "未命名提醒" : task.title,
                 icon: task.isDone ? "checkmark.circle.fill" : "circle",
-                shortcut: task.status.label,
-                group: "任务"
+                shortcut: store.list(for: task.effectiveListID).name,
+                group: "提醒事项"
             ) {
-                store.selectedTaskID = task.id
+                store.section = .list(task.effectiveListID)
+                store.editingTaskID = task.id
                 store.showCommandPalette = false
             })
         }
@@ -507,7 +512,7 @@ struct CommandPaletteView: View {
             HStack(spacing: 8) {
                 Image(systemName: "command")
                     .foregroundStyle(.secondary)
-                TextField("跳转任务、切换视图或执行命令…", text: $query)
+                TextField("跳转提醒事项、列表或执行命令…", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 15))
                     .focused($focused)
@@ -528,7 +533,7 @@ struct CommandPaletteView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     if items.isEmpty {
-                        Text("没有匹配的命令或任务")
+                        Text("没有匹配的命令或提醒事项")
                             .font(.system(size: 13))
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .center)
@@ -597,126 +602,149 @@ struct CommandPaletteView: View {
     }
 }
 
-// MARK: - Quick Capture Modal (Cmd+N)
+// MARK: - Zoomable Image Lightbox
 
-struct QuickCaptureView: View {
-    @Bindable var store: NavigatorStore
-    @State private var title: String = ""
-    @State private var notes: String = ""
-    @State private var status: TaskStatus = .todo
-    @State private var selectedTags: Set<String> = []
-    @State private var dueAt: String? = nil
-    @State private var repeatRule: RepeatRule = .none
-    @State private var showDuePopover: Bool = false
-    @State private var keepAdding: Bool = false
-    @FocusState private var titleFocused: Bool
+struct ImageLightboxView: View {
+    let image: NSImage
+    let filePath: String
+    let onClose: () -> Void
+
+    @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            TextField("要做什么？", text: $title)
-                .font(.system(size: 17, weight: .semibold))
-                .textFieldStyle(.plain)
-                .focused($titleFocused)
-                .onSubmit { submit() }
-
-            TextField("补充备注（可选）", text: $notes, axis: .vertical)
-                .font(.system(size: 13))
-                .textFieldStyle(.plain)
-                .lineLimit(2...4)
-
-            HStack(spacing: 8) {
-                Button {
-                    showDuePopover.toggle()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "calendar")
-                            .font(.system(size: 11))
-                        Text(DateHelper.dueBadge(dueAt)?.text ?? "设置时间")
-                            .font(.system(size: 12, weight: .medium))
-                            .monospacedDigit()
-                        if repeatRule != .none {
-                            Text("· \(repeatRule.label)")
-                                .font(.system(size: 11))
-                                .foregroundStyle(NavTheme.accentBlue)
+        VStack(spacing: 0) {
+            GeometryReader { geo in
+                ZStack {
+                    Color.black.opacity(0.92)
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                        .gesture(
+                            MagnifyGesture()
+                                .onChanged { value in
+                                    let next = min(max(lastScale * value.magnification, 1.0), 5.0)
+                                    scale = next
+                                    if next <= 1.01 {
+                                        offset = .zero
+                                        lastOffset = .zero
+                                    }
+                                }
+                                .onEnded { _ in
+                                    lastScale = scale
+                                }
+                        )
+                        .simultaneousGesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    guard scale > 1.01 else { return }
+                                    offset = CGSize(
+                                        width: lastOffset.width + value.translation.width,
+                                        height: lastOffset.height + value.translation.height
+                                    )
+                                }
+                                .onEnded { _ in
+                                    lastOffset = offset
+                                }
+                        )
+                        .onTapGesture(count: 2) {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                if scale > 1.2 {
+                                    resetZoom()
+                                } else {
+                                    scale = 2.5
+                                    lastScale = 2.5
+                                }
+                            }
                         }
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(dueAt != nil ? NavTheme.todayGold.opacity(0.14) : Color.primary.opacity(0.06))
-                    )
-                    .foregroundStyle(dueAt != nil ? NavTheme.todayGold : .secondary)
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showDuePopover, arrowEdge: .bottom) {
-                    DueDatePopover(
-                        currentDue: dueAt,
-                        currentRepeat: repeatRule,
-                        onApply: { newDue, newRepeat in
-                            dueAt = newDue
-                            repeatRule = newDue == nil ? .none : newRepeat
-                        },
-                        onDismiss: { showDuePopover = false }
-                    )
-                }
-
-                Picker("", selection: $status) {
-                    Text("待办").tag(TaskStatus.todo)
-                    Text("进行中").tag(TaskStatus.doing)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 120)
-
-                Spacer()
-            }
-
-            FlowLayout(spacing: 6) {
-                ForEach(store.liveTags) { tag in
-                    let on = selectedTags.contains(tag.id)
-                    TagPillView(tag: tag, selected: on, interactive: true) {
-                        if on { selectedTags.remove(tag.id) } else { selectedTags.insert(tag.id) }
-                    }
                 }
             }
 
-            Divider()
+            HStack(spacing: 12) {
+                Button {
+                    zoom(by: -0.5)
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .disabled(scale <= 1.01)
 
-            HStack {
-                Toggle(keepAdding ? "连续添加（保留日期与标签）" : "连续添加", isOn: $keepAdding)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 12))
+                Button("\(Int(scale * 100))%") {
+                    withAnimation(.easeInOut(duration: 0.16)) { resetZoom() }
+                }
+                .buttonStyle(.borderless)
+                .monospacedDigit()
+                .frame(minWidth: 46)
+
+                Button {
+                    zoom(by: 0.5)
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .disabled(scale >= 5.0)
+
+                Divider()
+                    .frame(height: 16)
+
+                Button("用预览打开") {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: filePath))
+                }
+                .controlSize(.small)
+
                 Spacer()
-                Button("取消") { store.showQuickCapture = false }
+
+                Text("双击放大 · 滚轮/双指缩放 · 拖拽移动")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Button("关闭") { onClose() }
                     .keyboardShortcut(.cancelAction)
-                Button("添加") { submit() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .controlSize(.small)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Color(nsColor: .textBackgroundColor))
         }
-        .padding(18)
-        .frame(width: 450)
-        .onAppear { titleFocused = true }
+        .frame(minWidth: 680, idealWidth: 920, minHeight: 500, idealHeight: 680)
+        .onKeyPress(characters: CharacterSet(charactersIn: "+=")) { _ in
+            zoom(by: 0.5)
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "-")) { _ in
+            zoom(by: -0.5)
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "0")) { _ in
+            withAnimation(.easeInOut(duration: 0.16)) { resetZoom() }
+            return .handled
+        }
     }
 
-    private func submit() {
-        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        _ = store.createTask(
-            title: clean,
-            notes: notes.trimmingCharacters(in: .whitespacesAndNewlines),
-            status: status,
-            tagIds: Array(selectedTags),
-            dueAt: dueAt,
-            repeatRule: repeatRule
-        )
-        title = ""
-        notes = ""
-        if !keepAdding {
-            store.showQuickCapture = false
-        } else {
-            titleFocused = true
+    private func zoom(by delta: CGFloat) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            let next = min(max(scale + delta, 1.0), 5.0)
+            scale = next
+            lastScale = next
+            if next <= 1.01 {
+                offset = .zero
+                lastOffset = .zero
+            }
         }
+    }
+
+    private func resetZoom() {
+        scale = 1.0
+        lastScale = 1.0
+        offset = .zero
+        lastOffset = .zero
     }
 }
 

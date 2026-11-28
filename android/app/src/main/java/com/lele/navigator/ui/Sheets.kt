@@ -39,8 +39,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lele.navigator.model.DateUtils
+import com.lele.navigator.model.ListStyle
 import com.lele.navigator.model.TagColors
 import com.lele.navigator.model.TagItem
+import com.lele.navigator.model.TaskListItem
 import com.lele.navigator.notify.ReminderScheduler
 import com.lele.navigator.ui.components.ThingsDivider
 import com.lele.navigator.ui.components.ThingsPill
@@ -95,20 +97,177 @@ fun CleanRoundedInput(
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
+fun AddListSheet(
+    editing: TaskListItem?,
+    canDelete: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String, String, String) -> Unit,
+    onDelete: (() -> Unit)? = null
+) {
+    val c = ThingsTheme.colors
+    var name by remember(editing?.id) { mutableStateOf(editing?.name ?: "") }
+    var color by remember(editing?.id) { mutableStateOf(editing?.color ?: "blue") }
+    var icon by remember(editing?.id) { mutableStateOf(editing?.icon ?: "list") }
+    val selectedColor = ListStyle.colorFor(color)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = c.cardSurface,
+        shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+        dragHandle = { SheetDragHandle() }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "取消",
+                    fontSize = 15.5.sp,
+                    color = c.inkSecondary,
+                    modifier = Modifier.clickable(onClick = onDismiss)
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = if (editing == null) "新建列表" else "编辑列表",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = c.inkPrimary
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "完成",
+                    fontSize = 15.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (name.isNotBlank()) c.accentBlue else c.inkTertiary,
+                    modifier = Modifier.clickable(enabled = name.isNotBlank()) {
+                        onSave(name.trim(), color, icon)
+                        onDismiss()
+                    }
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(selectedColor),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = ListStyle.iconFor(icon),
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(30.dp)
+                )
+            }
+
+            CleanRoundedInput(
+                value = name,
+                onValueChange = { name = it },
+                placeholder = "列表名称"
+            )
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                ListStyle.allColors.forEach { key ->
+                    val col = ListStyle.colorFor(key)
+                    val active = color == key
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .border(
+                                width = if (active) 2.5.dp else 0.dp,
+                                color = if (active) c.inkPrimary.copy(alpha = 0.4f) else Color.Transparent,
+                                shape = CircleShape
+                            )
+                            .padding(3.dp)
+                            .clip(CircleShape)
+                            .background(col)
+                            .clickable { color = key }
+                    )
+                }
+            }
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                ListStyle.allIcons.forEach { key ->
+                    val active = icon == key
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(if (active) selectedColor.copy(alpha = 0.18f) else c.subtleFill)
+                            .border(
+                                width = if (active) 1.5.dp else 0.dp,
+                                color = if (active) selectedColor else Color.Transparent,
+                                shape = CircleShape
+                            )
+                            .clickable { icon = key },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = ListStyle.iconFor(key),
+                            contentDescription = null,
+                            tint = if (active) selectedColor else c.inkSecondary,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
+            }
+
+            if (editing != null && canDelete && onDelete != null) {
+                ThingsDivider()
+                Text(
+                    text = "删除列表",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = c.danger,
+                    modifier = Modifier
+                        .clickable {
+                            onDelete()
+                            onDismiss()
+                        }
+                        .padding(vertical = 6.dp)
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
 fun QuickCaptureSheet(
+    lists: List<TaskListItem>,
     tags: List<TagItem>,
-    defaultStatus: String,
+    defaultListId: String,
+    defaultFlagged: Boolean,
     defaultDue: String?,
     defaultTagIds: List<String>,
     onDismiss: () -> Unit,
-    onSave: (String, String, List<String>, String?) -> Unit
+    onSave: (String, String, Boolean, List<String>, String?) -> Unit
 ) {
     val c = ThingsTheme.colors
     var title by remember { mutableStateOf("") }
-    var status by remember { mutableStateOf(defaultStatus) }
+    var listId by remember { mutableStateOf(defaultListId) }
+    var flagged by remember { mutableStateOf(defaultFlagged) }
     var selectedTags by remember { mutableStateOf(defaultTagIds.toSet()) }
     var dueAt by remember { mutableStateOf(defaultDue) }
-    var keepAdding by remember { mutableStateOf(false) }
     var showDueSheet by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
 
@@ -129,7 +288,7 @@ fun QuickCaptureSheet(
                 .imePadding()
                 .navigationBarsPadding()
                 .padding(horizontal = 20.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.Top,
@@ -139,9 +298,9 @@ fun QuickCaptureSheet(
                 Box(
                     modifier = Modifier
                         .padding(top = 3.dp)
-                        .size(19.dp)
-                        .clip(RoundedCornerShape(5.5.dp))
-                        .border(1.6.dp, c.checkboxBorder, RoundedCornerShape(5.5.dp))
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .border(1.6.dp, c.checkboxBorder, CircleShape)
                 )
                 BasicTextField(
                     value = title,
@@ -156,9 +315,8 @@ fun QuickCaptureSheet(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = {
                         if (title.isNotBlank()) {
-                            onSave(title, status, selectedTags.toList(), dueAt)
-                            title = ""
-                            if (!keepAdding) onDismiss()
+                            onSave(title, listId, flagged, selectedTags.toList(), dueAt)
+                            onDismiss()
                         }
                     }),
                     modifier = Modifier
@@ -166,7 +324,7 @@ fun QuickCaptureSheet(
                         .focusRequester(focusRequester),
                     decorationBox = { inner ->
                         if (title.isEmpty()) {
-                            Text("新待办事项", color = c.inkTertiary, fontSize = 18.sp)
+                            Text("新提醒事项", color = c.inkTertiary, fontSize = 18.sp)
                         }
                         inner()
                     }
@@ -179,36 +337,37 @@ fun QuickCaptureSheet(
             ) {
                 val dueLabel = DateUtils.dueLabel(dueAt)?.first
                 ThingsPill(
-                    text = dueLabel ?: "今天",
-                    textColor = if (dueAt != null) c.todayGold else c.inkSecondary,
-                    backgroundColor = if (dueAt != null) c.todayGoldSoft else c.subtleFill,
-                    icon = Icons.Rounded.Star,
-                    onClick = {
-                        dueAt = if (dueAt == null) DateUtils.presetDue(0, 18) else null
-                    }
-                )
-                ThingsPill(
-                    text = "选时间",
-                    textColor = c.inkSecondary,
-                    backgroundColor = c.subtleFill,
+                    text = dueLabel ?: "添加日期",
+                    textColor = if (dueAt != null) c.accentBlue else c.inkSecondary,
+                    backgroundColor = if (dueAt != null) c.accentBlueSoft else c.subtleFill,
                     icon = Icons.Rounded.CalendarToday,
                     onClick = { showDueSheet = true }
                 )
                 ThingsPill(
-                    text = "进行中",
-                    textColor = if (status == "doing") c.doingBlue else c.inkSecondary,
-                    backgroundColor = if (status == "doing") c.doingBlueSoft else c.subtleFill,
-                    icon = Icons.Rounded.Whatshot,
-                    onClick = { status = if (status == "doing") "todo" else "doing" }
+                    text = "旗标",
+                    textColor = if (flagged) c.todayGold else c.inkSecondary,
+                    backgroundColor = if (flagged) c.todayGoldSoft else c.subtleFill,
+                    icon = Icons.Rounded.Flag,
+                    onClick = { flagged = !flagged }
                 )
+                lists.forEach { list ->
+                    val on = listId == list.id
+                    val col = ListStyle.colorFor(list.color)
+                    ThingsPill(
+                        text = list.name,
+                        textColor = if (on) Color.White else c.inkSecondary,
+                        backgroundColor = if (on) col else c.subtleFill,
+                        dotColor = if (on) Color.White else col,
+                        onClick = { listId = list.id }
+                    )
+                }
                 tags.forEach { tag ->
                     val on = selectedTags.contains(tag.id)
-                    val color = TagColors.colorFor(tag.hue)
+                    val col = TagColors.colorFor(tag.hue)
                     ThingsPill(
-                        text = tag.label,
-                        textColor = if (on) color else c.inkSecondary,
-                        backgroundColor = if (on) color.copy(alpha = if (c.isDark) 0.22f else 0.13f) else c.subtleFill,
-                        dotColor = color,
+                        text = "#${tag.label}",
+                        textColor = if (on) Color.White else col,
+                        backgroundColor = if (on) col else col.copy(alpha = 0.14f),
                         onClick = {
                             selectedTags = if (on) selectedTags - tag.id else selectedTags + tag.id
                         }
@@ -222,34 +381,11 @@ fun QuickCaptureSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { keepAdding = !keepAdding }
-                        .padding(horizontal = 4.dp, vertical = 4.dp)
-                ) {
-                    Icon(
-                        imageVector = if (keepAdding) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
-                        contentDescription = null,
-                        tint = if (keepAdding) c.accentBlue else c.inkTertiary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Text(
-                        text = if (keepAdding) "连续添加（保留日期与标签）" else "连续添加",
-                        fontSize = 13.sp,
-                        color = if (keepAdding) c.accentBlue else c.inkSecondary
-                    )
-                }
-
                 Spacer(Modifier.weight(1f))
-
                 Button(
                     onClick = {
-                        onSave(title, status, selectedTags.toList(), dueAt)
-                        title = ""
-                        if (!keepAdding) onDismiss()
+                        onSave(title, listId, flagged, selectedTags.toList(), dueAt)
+                        onDismiss()
                     },
                     enabled = title.isNotBlank(),
                     shape = RoundedCornerShape(11.dp),
@@ -434,7 +570,6 @@ fun SettingsSheet(
         ) {
             Text("设置", fontSize = 19.sp, fontWeight = FontWeight.Bold, color = c.inkPrimary)
 
-            // Appearance selector
             Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
@@ -467,7 +602,6 @@ fun SettingsSheet(
                 }
             }
 
-            // Notification row + Lead reminder selector
             Column(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier
@@ -543,7 +677,6 @@ fun SettingsSheet(
                 }
             }
 
-            // Sync row
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -553,12 +686,7 @@ fun SettingsSheet(
                     .clickable(onClick = onOpenSync)
                     .padding(14.dp)
             ) {
-                Icon(
-                    Icons.Rounded.Sync,
-                    contentDescription = null,
-                    tint = c.accentBlue,
-                    modifier = Modifier.size(22.dp)
-                )
+                Icon(Icons.Rounded.Sync, contentDescription = null, tint = c.accentBlue, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("局域网同步与配对", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = c.inkPrimary)
@@ -571,11 +699,7 @@ fun SettingsSheet(
                 Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = c.inkTertiary)
             }
 
-            // Data Export / Import row
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = {
                         vm.exportMarkdown { md ->
@@ -707,7 +831,7 @@ fun TagManagerSheet(
                             )
                             Spacer(Modifier.width(10.dp))
                             Text(
-                                text = tag.label,
+                                text = "#${tag.label}",
                                 fontSize = 15.sp,
                                 color = c.inkPrimary,
                                 modifier = Modifier.weight(1f)

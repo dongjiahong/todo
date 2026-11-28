@@ -10,9 +10,95 @@ enum TaskStatus: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .todo: return "待办"
-        case .doing: return "进行中"
+        case .todo, .doing: return "未完成"
         case .done: return "已完成"
+        }
+    }
+}
+
+enum TaskPriority: Int, Codable, CaseIterable, Identifiable {
+    case none = 0
+    case low = 1
+    case medium = 2
+    case high = 3
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .none: return "无"
+        case .low: return "低"
+        case .medium: return "中"
+        case .high: return "高"
+        }
+    }
+
+    var bangPrefix: String {
+        switch self {
+        case .none: return ""
+        case .low: return "!"
+        case .medium: return "!!"
+        case .high: return "!!!"
+        }
+    }
+}
+
+enum ListColor: String, Codable, CaseIterable, Identifiable {
+    case blue
+    case orange
+    case green
+    case red
+    case purple
+    case pink
+    case yellow
+    case gray
+
+    var id: String { rawValue }
+
+    var color: Color {
+        NavTheme.listColor(for: self)
+    }
+
+    var label: String {
+        switch self {
+        case .blue: return "蓝色"
+        case .orange: return "橙色"
+        case .green: return "绿色"
+        case .red: return "红色"
+        case .purple: return "紫色"
+        case .pink: return "粉色"
+        case .yellow: return "黄色"
+        case .gray: return "灰色"
+        }
+    }
+}
+
+enum ListIcon: String, Codable, CaseIterable, Identifiable {
+    case list
+    case work
+    case study
+    case life
+    case home
+    case cart
+    case star
+    case book
+    case code
+    case heart
+
+    var id: String { rawValue }
+
+    var symbolName: String {
+        switch self {
+        case .list: return "list.bullet"
+        case .work: return "desktopcomputer"
+        case .study: return "graduationcap.fill"
+        case .life: return "gamecontroller.fill"
+        case .home: return "house.fill"
+        case .cart: return "cart.fill"
+        case .star: return "star.fill"
+        case .book: return "book.fill"
+        case .code: return "chevron.left.forwardslash.chevron.right"
+        case .heart: return "heart.fill"
         }
     }
 }
@@ -64,11 +150,33 @@ struct SubtaskItem: Codable, Identifiable, Equatable, Hashable {
     var order: Int
 }
 
+struct TaskListItem: Codable, Identifiable, Equatable, Hashable {
+    static let defaultID = "list_reminders"
+
+    var id: String
+    var name: String
+    var color: String
+    var icon: String
+    var order: Int
+    var updatedAt: Int64
+    var deleted: Bool?
+
+    var isDeleted: Bool { deleted == true }
+    var listColor: ListColor { ListColor(rawValue: color) ?? .blue }
+    var listIcon: ListIcon { ListIcon(rawValue: icon) ?? .list }
+    var swiftUIColor: Color { listColor.color }
+    var symbolName: String { listIcon.symbolName }
+}
+
 struct TaskItem: Codable, Identifiable, Equatable, Hashable {
     var id: String
     var title: String
     var notes: String
     var status: TaskStatus
+    var listId: String?
+    var flagged: Bool?
+    var priority: Int?
+    var url: String?
     var subtasks: [SubtaskItem]
     var tagIds: [String]
     var dueAt: String?
@@ -83,6 +191,13 @@ struct TaskItem: Codable, Identifiable, Equatable, Hashable {
 
     var isDeleted: Bool { deleted == true }
     var isDone: Bool { status == .done }
+    var isFlagged: Bool { flagged == true }
+    var effectiveListID: String {
+        if let listId, !listId.isEmpty { return listId }
+        return TaskListItem.defaultID
+    }
+    var taskPriority: TaskPriority { TaskPriority(rawValue: priority ?? 0) ?? .none }
+    var cleanURL: String { (url ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
     var activeRepeat: RepeatRule { repeatRule ?? .none }
     var attachmentList: [String] { attachments ?? [] }
 
@@ -104,6 +219,7 @@ struct TagItem: Codable, Identifiable, Equatable, Hashable {
 struct BoardState: Codable {
     var tasks: [TaskItem]
     var tags: [TagItem]
+    var lists: [TaskListItem]?
     var seeded: Bool
 }
 
@@ -133,22 +249,20 @@ struct SyncEvent: Codable {
     var type: String
     var tasks: [TaskItem]?
     var tags: [TagItem]?
+    var lists: [TaskListItem]?
     var status: SyncStatus?
     var at: Int64?
 }
 
 enum NavSection: Hashable {
     case today
-    case doing
-    case todo
-    case upcoming
-    case logbook
+    case scheduled
+    case all
+    case flagged
+    case completed
+    case list(String)
+    case allTags
     case tag(String)
-}
-
-enum ViewMode: String, CaseIterable {
-    case list
-    case board
 }
 
 enum DateHelper {
@@ -175,8 +289,8 @@ enum DateHelper {
         dueFormatter.string(from: date)
     }
 
-    static func todayPrefix() -> String {
-        dayFormatter.string(from: Date())
+    static func todayDayNumber() -> Int {
+        Calendar.current.component(.day, from: Date())
     }
 
     static func presetDate(daysOffset: Int, hour: Int, minute: Int = 0) -> String {
@@ -228,7 +342,7 @@ enum DateHelper {
         }
 
         if late {
-            return ("已逾期 · \(dayStr) \(timeStr)", .late)
+            return ("\(dayStr) \(timeStr)", .late)
         }
         if !settled && cal.isDateInToday(d) {
             return ("今天 \(timeStr)", .soon)
@@ -268,16 +382,6 @@ enum DateHelper {
             }
         }
         return urls
-    }
-
-    static func todaySubtitle() -> String {
-        let now = Date()
-        let cal = Calendar.current
-        let month = cal.component(.month, from: now)
-        let day = cal.component(.day, from: now)
-        let wds = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
-        let wd = wds[cal.component(.weekday, from: now) - 1]
-        return "\(month)月\(day)日 · \(wd)"
     }
 
     static func upcomingGroupTitle(for dueAt: String?) -> String {

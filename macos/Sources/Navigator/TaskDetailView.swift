@@ -1,18 +1,19 @@
 import AppKit
-import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Non-blocking right-side Inspector panel.
-/// First-class structured subtasks + clean native Notes editor (zero dual-layer hacks).
-struct TaskDetailView: View {
+/// Floating Apple Reminders-style `(i)` Inspector Popover.
+struct TaskInspectorPopover: View {
     let taskID: String
     @Bindable var store: NavigatorStore
 
+    @State private var title: String = ""
+    @State private var notes: String = ""
+    @State private var urlText: String = ""
     @State private var newSubtaskTitle: String = ""
-    @State private var showDuePopover: Bool = false
-    @State private var showImageImporter: Bool = false
-    @State private var keyMonitor: Any?
+    @State private var showDatePicker: Bool = false
+    @State private var pickerDate: Date = Date()
+    @State private var showTagPicker: Bool = false
 
     private var task: TaskItem? {
         store.liveTasks.first { $0.id == taskID }
@@ -20,282 +21,308 @@ struct TaskDetailView: View {
 
     var body: some View {
         if let task {
-            VStack(spacing: 0) {
-                // Top action strip
-                HStack(spacing: 8) {
-                    Picker("", selection: Binding(
-                        get: { task.status },
-                        set: { store.moveTask(id: task.id, to: $0) }
-                    )) {
-                        ForEach(TaskStatus.allCases) { st in
-                            Text(st.label).tag(st)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 200)
-
-                    Spacer()
-
-                    Button {
-                        if !pasteImageFromClipboard(taskID: task.id) {
-                            showImageImporter = true
-                        }
-                    } label: {
-                        Image(systemName: "photo.badge.plus")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("粘贴剪贴板图片 (⌘V) 或选择图片")
-
-                    Button(role: .destructive) {
-                        store.deleteTask(id: task.id)
-                    } label: {
-                        Image(systemName: "trash")
-                            .foregroundStyle(.red)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("删除任务（可撤销）")
-
-                    Button {
-                        store.selectedTaskID = nil
-                    } label: {
-                        Image(systemName: "xmark")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("关闭详情")
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-
-                Divider()
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        // Title
-                        TextField(
-                            "要做什么？",
-                            text: Binding(
-                                get: { task.title },
-                                set: { val in
-                                    store.debouncedPatchTask(id: task.id) { t, now in
-                                        t.title = val
-                                        t.stamps?["title"] = now
-                                    }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    // Header: Title + Flag toggle button (matching screenshot top-right button)
+                    HStack(alignment: .top, spacing: 8) {
+                        TextField("提醒事项标题", text: $title, axis: .vertical)
+                            .font(.system(size: 15, weight: .semibold))
+                            .textFieldStyle(.plain)
+                            .onChange(of: title) { _, val in
+                                store.debouncedPatchTask(id: taskID) { t, now in
+                                    t.title = val
+                                    t.stamps?["title"] = now
                                 }
-                            ),
-                            axis: .vertical
-                        )
-                        .font(.system(size: 19, weight: .semibold))
+                            }
+
+                        Button {
+                            store.toggleFlag(id: taskID)
+                        } label: {
+                            Image(systemName: task.isFlagged ? "flag.fill" : "flag")
+                                .font(.system(size: 13))
+                                .foregroundStyle(task.isFlagged ? .white : .secondary)
+                                .frame(width: 34, height: 24)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(task.isFlagged ? NavTheme.flaggedOrange : Color(nsColor: .controlBackgroundColor))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .help(task.isFlagged ? "取消旗标" : "添加旗标")
+                    }
+
+                    TextField("备注", text: $notes, axis: .vertical)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
                         .textFieldStyle(.plain)
-                        .lineLimit(1...4)
+                        .lineLimit(1...5)
+                        .onChange(of: notes) { _, val in
+                            store.debouncedPatchTask(id: taskID) { t, now in
+                                t.notes = val
+                                t.stamps?["notes"] = now
+                            }
+                        }
 
-                        // Due & Repeat compact pill (opens bespoke DueDatePopover)
-                        HStack(spacing: 8) {
+                    Divider()
+
+                    // Tags section
+                    VStack(alignment: .leading, spacing: 6) {
+                        let taskTags = task.tagIds.compactMap { id in store.liveTags.first { $0.id == id } }
+                        if taskTags.isEmpty {
                             Button {
-                                showDuePopover.toggle()
+                                showTagPicker.toggle()
                             } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "calendar")
-                                        .font(.system(size: 11.5))
-                                    Text(DateHelper.dueBadge(task.dueAt, settled: task.isDone)?.text ?? "设置截止时间")
-                                        .font(.system(size: 12, weight: .medium))
-                                        .monospacedDigit()
-                                    if task.activeRepeat != .none {
-                                        Text("· \(task.activeRepeat.label)")
-                                            .font(.system(size: 11.5, weight: .medium))
-                                            .foregroundStyle(Color.accentColor)
-                                    }
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                                Text("添加标签")
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
-                            .popover(isPresented: $showDuePopover, arrowEdge: .bottom) {
-                                DueDatePopover(
-                                    currentDue: task.dueAt,
-                                    currentRepeat: task.activeRepeat,
-                                    onApply: { newDue, newRepeat in
-                                        store.patchTask(id: task.id) { t, now in
-                                            t.dueAt = newDue
-                                            t.repeatRule = newDue == nil ? RepeatRule.none : newRepeat
-                                            t.stamps?["dueAt"] = now
-                                            t.stamps?["repeatRule"] = now
-                                        }
-                                    },
-                                    onDismiss: { showDuePopover = false }
-                                )
-                            }
-
-                            if task.dueAt != nil && store.notificationState != .authorized {
-                                Button {
-                                    if store.notificationState == .denied {
-                                        store.openSystemNotificationSettings()
-                                    } else {
-                                        store.requestNotificationPermission()
+                        } else {
+                            FlowLayout(spacing: 5) {
+                                ForEach(taskTags) { tag in
+                                    TagPillView(tag: tag, selected: true, interactive: true) {
+                                        toggleTag(tag.id)
                                     }
+                                }
+                                Button {
+                                    showTagPicker.toggle()
                                 } label: {
-                                    Label(
-                                        store.notificationState == .denied ? "通知被拒，去开启" : "开启到期通知",
-                                        systemImage: "bell.badge"
-                                    )
-                                    .font(.system(size: 11.5, weight: .medium))
-                                    .foregroundStyle(NavTheme.todayGold)
+                                    Text("+ 标签")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
                                 }
                                 .buttonStyle(.plain)
                             }
                         }
 
-                        // Tags row
-                        FlowLayout(spacing: 6) {
-                            ForEach(store.liveTags) { tag in
-                                let selected = task.tagIds.contains(tag.id)
-                                TagPillView(tag: tag, selected: selected, interactive: true) {
-                                    store.patchTask(id: task.id, rescheduleNotifications: false) { t, now in
-                                        if selected {
-                                            t.tagIds.removeAll { $0 == tag.id }
-                                        } else {
-                                            t.tagIds.append(tag.id)
-                                        }
-                                        t.stamps?["tagIds"] = now
+                        if showTagPicker && !store.liveTags.isEmpty {
+                            FlowLayout(spacing: 5) {
+                                ForEach(store.liveTags) { tag in
+                                    let on = task.tagIds.contains(tag.id)
+                                    TagPillView(tag: tag, selected: on, interactive: true) {
+                                        toggleTag(tag.id)
                                     }
                                 }
-                            }
-                        }
-
-                        Divider()
-
-                        // First-class Structured Subtasks Section
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("子任务")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                if task.checklistTotalCount > 0 {
-                                    Text("\(task.checklistDoneCount)/\(task.checklistTotalCount)")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(.tertiary)
-                                        .monospacedDigit()
-                                }
-                                Spacer()
-                            }
-
-                            ForEach(task.subtasks) { sub in
-                                HStack(spacing: 4) {
-                                    TaskCheckbox(
-                                        checked: sub.done,
-                                        isCircular: true,
-                                        size: 14,
-                                        onToggle: { store.toggleSubtask(taskID: task.id, subtaskID: sub.id) }
-                                    )
-
-                                    TextField(
-                                        "子任务内容",
-                                        text: Binding(
-                                            get: { sub.title },
-                                            set: { store.updateSubtaskTitle(taskID: task.id, subtaskID: sub.id, title: $0) }
-                                        )
-                                    )
-                                    .textFieldStyle(.plain)
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(sub.done ? .secondary : .primary)
-                                    .strikethrough(sub.done)
-
-                                    Button {
-                                        store.deleteSubtask(taskID: task.id, subtaskID: sub.id)
-                                    } label: {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(.tertiary)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                .padding(.vertical, 1)
-                            }
-
-                            // Inline quick add subtask
-                            HStack(spacing: 8) {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.tertiary)
-                                TextField("添加子任务，回车确认…", text: $newSubtaskTitle)
-                                    .textFieldStyle(.plain)
-                                    .font(.system(size: 13))
-                                    .onSubmit {
-                                        store.addSubtask(to: task.id, title: newSubtaskTitle)
-                                        newSubtaskTitle = ""
-                                    }
                             }
                             .padding(.top, 2)
                         }
+                    }
 
-                        Divider()
+                    Divider()
 
-                        // Clean Native Notes Section
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("备注")
-                                .font(.system(size: 12, weight: .semibold))
+                    // 提醒我 (指定日期 & 重复)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .top, spacing: 10) {
+                            Text("提醒我")
+                                .font(.system(size: 12.5))
                                 .foregroundStyle(.secondary)
+                                .frame(width: 48, alignment: .trailing)
 
-                            ZStack(alignment: .topLeading) {
-                                if task.notes.isEmpty {
-                                    Text("补充细节、背景或链接…")
-                                        .font(.system(size: 13.5))
-                                        .foregroundStyle(.tertiary)
-                                        .padding(.top, 5)
-                                        .padding(.leading, 4)
-                                }
-                                TextEditor(text: Binding(
-                                    get: { task.notes },
-                                    set: { val in
-                                        store.debouncedPatchTask(id: task.id) { t, now in
-                                            t.notes = val
-                                            t.stamps?["notes"] = now
+                            VStack(alignment: .leading, spacing: 8) {
+                                Toggle("指定日期", isOn: Binding(
+                                    get: { task.dueAt != nil && !task.dueAt!.isEmpty },
+                                    set: { enabled in
+                                        if enabled {
+                                            let defaultDue = DateHelper.presetDate(daysOffset: 0, hour: 18)
+                                            pickerDate = DateHelper.parseDue(defaultDue) ?? Date()
+                                            store.patchTask(id: taskID) { t, now in
+                                                t.dueAt = defaultDue
+                                                t.stamps?["dueAt"] = now
+                                            }
+                                        } else {
+                                            store.patchTask(id: taskID) { t, now in
+                                                t.dueAt = nil
+                                                t.repeatRule = RepeatRule.none
+                                                t.stamps?["dueAt"] = now
+                                                t.stamps?["repeatRule"] = now
+                                            }
                                         }
                                     }
                                 ))
-                                .font(.system(size: 13.5))
-                                .scrollContentBackground(.hidden)
-                                .frame(minHeight: 140)
-                            }
+                                .toggleStyle(.checkbox)
+                                .font(.system(size: 12.5))
 
-                            // Auto-detected clickable links
-                            let urls = DateHelper.extractURLs(from: task.notes)
-                            if !urls.isEmpty {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    ForEach(urls, id: \.absoluteString) { url in
-                                        Link(destination: url) {
-                                            HStack(spacing: 5) {
-                                                Image(systemName: "link")
-                                                    .font(.system(size: 11))
-                                                Text(url.absoluteString)
-                                                    .font(.system(size: 12))
-                                                    .lineLimit(1)
-                                            }
-                                            .foregroundStyle(Color.accentColor)
+                                if task.dueAt != nil && !task.dueAt!.isEmpty {
+                                    DatePicker(
+                                        "",
+                                        selection: $pickerDate,
+                                        displayedComponents: [.date, .hourAndMinute]
+                                    )
+                                    .labelsHidden()
+                                    .datePickerStyle(.compact)
+                                    .onChange(of: pickerDate) { _, d in
+                                        let formatted = DateHelper.formatDue(d)
+                                        store.patchTask(id: taskID) { t, now in
+                                            t.dueAt = formatted
+                                            t.stamps?["dueAt"] = now
                                         }
                                     }
+
+                                    HStack(spacing: 6) {
+                                        Text("重复")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.secondary)
+                                        Picker("", selection: Binding(
+                                            get: { task.activeRepeat },
+                                            set: { rule in
+                                                store.patchTask(id: taskID) { t, now in
+                                                    t.repeatRule = rule
+                                                    t.stamps?["repeatRule"] = now
+                                                }
+                                            }
+                                        )) {
+                                            ForEach(RepeatRule.allCases) { r in
+                                                Text(r.label).tag(r)
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .frame(width: 96)
+                                    }
                                 }
-                                .padding(.top, 4)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    // 优先级 & 列表
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            Text("优先级")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 48, alignment: .trailing)
+
+                            Picker("", selection: Binding(
+                                get: { task.taskPriority },
+                                set: { p in store.setPriority(id: taskID, priority: p) }
+                            )) {
+                                ForEach(TaskPriority.allCases) { p in
+                                    Text(p.label).tag(p)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        HStack(spacing: 10) {
+                            Text("列表")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 48, alignment: .trailing)
+
+                            Picker("", selection: Binding(
+                                get: { task.effectiveListID },
+                                set: { listID in store.moveTaskToList(id: taskID, listID: listID) }
+                            )) {
+                                ForEach(store.liveLists) { list in
+                                    HStack(spacing: 6) {
+                                        Circle()
+                                            .fill(list.swiftUIColor)
+                                            .frame(width: 8, height: 8)
+                                        Text(list.name)
+                                    }
+                                    .tag(list.id)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    Divider()
+
+                    // URL & 图像
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            Text("URL")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 48, alignment: .trailing)
+
+                            TextField("无", text: $urlText)
+                                .font(.system(size: 12.5))
+                                .textFieldStyle(.plain)
+                                .onChange(of: urlText) { _, val in
+                                    store.debouncedPatchTask(id: taskID) { t, now in
+                                        t.url = val.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        t.stamps?["url"] = now
+                                    }
+                                }
+
+                            if !urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                               let u = URL(string: urlText.contains("://") ? urlText : "https://\(urlText)") {
+                                Link(destination: u) {
+                                    Image(systemName: "arrow.up.right.square")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(NavTheme.accentBlue)
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
 
-                        // Attachments strip
-                        if !task.attachmentList.isEmpty {
-                            Divider()
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("图片附件")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 10) {
+                        HStack(alignment: .top, spacing: 10) {
+                            Text("图像")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 48, alignment: .trailing)
+                                .padding(.top, 2)
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 8) {
+                                    Button {
+                                        pickImageFromDisk()
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "plus.circle")
+                                                .font(.system(size: 12))
+                                            Text("添加图像…")
+                                                .font(.system(size: 12.5))
+                                        }
+                                        .foregroundStyle(.primary)
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Button {
+                                        pasteImageFromClipboard()
+                                    } label: {
+                                        Text("粘贴")
+                                            .font(.system(size: 11.5))
+                                            .foregroundStyle(NavTheme.accentBlue)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+
+                                if !task.attachmentList.isEmpty {
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 56), spacing: 6)], spacing: 6) {
                                         ForEach(task.attachmentList, id: \.self) { name in
-                                            if let url = store.assetURL(for: name) {
-                                                AttachmentThumbView(
-                                                    url: url,
-                                                    onTap: { store.previewImagePath = url.path },
-                                                    onRemove: { store.removeAttachment(from: task.id, name: name) }
-                                                )
+                                            if let url = store.assetURL(for: name), let img = NSImage(contentsOf: url) {
+                                                ZStack(alignment: .topTrailing) {
+                                                    Image(nsImage: img)
+                                                        .resizable()
+                                                        .scaledToFill()
+                                                        .frame(width: 56, height: 56)
+                                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                                        .onTapGesture {
+                                                            store.previewImagePath = url.path
+                                                        }
+                                                    Button {
+                                                        store.removeAttachment(from: taskID, name: name)
+                                                    } label: {
+                                                        Image(systemName: "xmark.circle.fill")
+                                                            .font(.system(size: 13))
+                                                            .foregroundStyle(.white, .black.opacity(0.65))
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .offset(x: 3, y: -3)
+                                                }
                                             }
                                         }
                                     }
@@ -303,213 +330,129 @@ struct TaskDetailView: View {
                             }
                         }
                     }
-                    .padding(18)
+
+                    Divider()
+
+                    // 子任务 (preserving structured subtasks cleanly inside Inspector)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("子任务")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            if task.checklistTotalCount > 0 {
+                                Text("\(task.checklistDoneCount)/\(task.checklistTotalCount)")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.tertiary)
+                                    .monospacedDigit()
+                            }
+                        }
+
+                        ForEach(task.subtasks) { st in
+                            HStack(spacing: 6) {
+                                TaskCheckbox(checked: st.done, tint: NavTheme.accentBlue, size: 14) {
+                                    store.toggleSubtask(taskID: taskID, subtaskID: st.id)
+                                }
+                                TextField("", text: Binding(
+                                    get: { st.title },
+                                    set: { store.updateSubtaskTitle(taskID: taskID, subtaskID: st.id, title: $0) }
+                                ))
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 12.5))
+                                .strikethrough(st.done)
+                                .foregroundStyle(st.done ? .secondary : .primary)
+
+                                Button {
+                                    store.deleteSubtask(taskID: taskID, subtaskID: st.id)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            TextField("添加子任务，回车确认", text: $newSubtaskTitle)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 12.5))
+                                .onSubmit {
+                                    store.addSubtask(to: taskID, title: newSubtaskTitle)
+                                    newSubtaskTitle = ""
+                                }
+                        }
+                        .padding(.top, 2)
+                    }
+
+                    Divider()
+
+                    HStack {
+                        Spacer()
+                        Button(role: .destructive) {
+                            store.deleteTask(id: taskID)
+                        } label: {
+                            Label("删除提醒事项", systemImage: "trash")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(NavTheme.danger)
+                    }
                 }
+                .padding(14)
             }
-            .fileImporter(
-                isPresented: $showImageImporter,
-                allowedContentTypes: [.image],
-                allowsMultipleSelection: false
-            ) { result in
-                if case .success(let urls) = result, let url = urls.first,
-                   let data = try? Data(contentsOf: url) {
-                    store.attachImage(to: task.id, data: data, ext: url.pathExtension.isEmpty ? "png" : url.pathExtension)
-                }
-            }
-            .onAppear {
-                installPasteMonitor()
-            }
-            .onDisappear {
-                removePasteMonitor()
-            }
-        } else {
-            VStack(spacing: 8) {
-                Image(systemName: "sidebar.right")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.tertiary)
-                Text("选择一张任务查看详情")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(width: 300)
+            .frame(maxHeight: 480)
+            .background(Color(nsColor: .textBackgroundColor))
+            .presentationBackground(Color(nsColor: .textBackgroundColor))
+            .onAppear { syncDrafts(from: task) }
+            .onChange(of: task.id) { _, _ in syncDrafts(from: task) }
         }
     }
 
-    private func installPasteMonitor() {
-        removePasteMonitor()
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard flags == .command,
-                  event.charactersIgnoringModifiers?.lowercased() == "v" else {
-                return event
-            }
-            let targetID = store.selectedTaskID ?? taskID
-            if pasteImageFromClipboard(taskID: targetID, allowWhenTextPresent: false) {
-                return nil
-            }
-            return event
+    private func syncDrafts(from task: TaskItem) {
+        title = task.title
+        notes = task.notes
+        urlText = task.cleanURL
+        if let d = DateHelper.parseDue(task.dueAt) {
+            pickerDate = d
         }
     }
 
-    private func removePasteMonitor() {
-        if let monitor = keyMonitor {
-            NSEvent.removeMonitor(monitor)
-            keyMonitor = nil
+    private func toggleTag(_ tagID: String) {
+        store.patchTask(id: taskID, rescheduleNotifications: false) { t, now in
+            if t.tagIds.contains(tagID) {
+                t.tagIds.removeAll { $0 == tagID }
+            } else {
+                t.tagIds.append(tagID)
+            }
+            t.stamps?["tagIds"] = now
         }
     }
 
-    @discardableResult
-    private func pasteImageFromClipboard(taskID: String, allowWhenTextPresent: Bool = true) -> Bool {
+    private func pickImageFromDisk() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
+            let ext = url.pathExtension.isEmpty ? "png" : url.pathExtension.lowercased()
+            store.attachImage(to: taskID, data: data, ext: ext)
+        }
+    }
+
+    private func pasteImageFromClipboard() {
         let pb = NSPasteboard.general
-        let imageExts: Set<String> = ["png", "jpg", "jpeg", "webp", "heic", "gif", "tiff", "bmp"]
-
-        // When invoked via ⌘V while clipboard also contains plain text (e.g. rich copy from browser),
-        // let the focused text field handle normal text paste instead of hijacking it.
-        if !allowWhenTextPresent,
-           let str = pb.string(forType: .string),
-           !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let fileURLs = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
-            let hasImageFiles = fileURLs.contains { imageExts.contains($0.pathExtension.lowercased()) }
-            if !hasImageFiles {
-                return false
-            }
+        if let png = pb.data(forType: .png) {
+            store.attachImage(to: taskID, data: png, ext: "png")
+            return
         }
-
-        // 1. Direct image data (screenshots, browser "Copy Image", Snapzy, etc.)
-        if let pngData = pb.data(forType: .png), !pngData.isEmpty {
-            store.attachImage(to: taskID, data: pngData, ext: "png")
-            return true
-        }
-        if let tiffData = pb.data(forType: .tiff),
-           let rep = NSBitmapImageRep(data: tiffData),
+        if let tiff = pb.data(forType: .tiff),
+           let rep = NSBitmapImageRep(data: tiff),
            let png = rep.representation(using: .png, properties: [:]) {
             store.attachImage(to: taskID, data: png, ext: "png")
-            return true
-        }
-
-        // 2. Copied image file URL(s) from Finder
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
-            let imgURLs = urls.filter { imageExts.contains($0.pathExtension.lowercased()) }
-            if !imgURLs.isEmpty {
-                for url in imgURLs {
-                    if let data = try? Data(contentsOf: url), !data.isEmpty {
-                        let ext = url.pathExtension.isEmpty ? "png" : url.pathExtension.lowercased()
-                        store.attachImage(to: taskID, data: data, ext: ext)
-                    }
-                }
-                return true
-            }
-        }
-
-        return false
-    }
-}
-
-/// Simple horizontal wrapping layout for tags.
-struct FlowLayout: Layout {
-    var spacing: CGFloat = 6
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxW = proposal.width ?? 300
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowH: CGFloat = 0
-        for sub in subviews {
-            let sz = sub.sizeThatFits(.unspecified)
-            if x + sz.width > maxW, x > 0 {
-                x = 0
-                y += rowH + spacing
-                rowH = 0
-            }
-            x += sz.width + spacing
-            rowH = max(rowH, sz.height)
-        }
-        return CGSize(width: maxW, height: y + rowH)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowH: CGFloat = 0
-        for sub in subviews {
-            let sz = sub.sizeThatFits(.unspecified)
-            if x + sz.width > bounds.maxX, x > bounds.minX {
-                x = bounds.minX
-                y += rowH + spacing
-                rowH = 0
-            }
-            sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sz))
-            x += sz.width + spacing
-            rowH = max(rowH, sz.height)
-        }
-    }
-}
-
-private final class ThumbnailCache {
-    static let shared = ThumbnailCache()
-    private let cache = NSCache<NSString, NSImage>()
-
-    private init() {
-        cache.countLimit = 128
-    }
-
-    func thumbnail(for url: URL, maxPixelSize: Int = 180) -> NSImage? {
-        let key = url.path as NSString
-        if let hit = cache.object(forKey: key) {
-            return hit
-        }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        let opts: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-            kCGImageSourceCreateThumbnailWithTransform: true
-        ]
-        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary) else {
-            return nil
-        }
-        let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        cache.setObject(img, forKey: key)
-        return img
-    }
-}
-
-private struct AttachmentThumbView: View {
-    let url: URL
-    let onTap: () -> Void
-    let onRemove: () -> Void
-
-    @State private var image: NSImage?
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Group {
-                if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.primary.opacity(0.06))
-                }
-            }
-            .frame(width: 72, height: 72)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .onTapGesture(perform: onTap)
-
-            Button(action: onRemove) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.white, .black.opacity(0.6))
-            }
-            .buttonStyle(.plain)
-            .offset(x: 4, y: -4)
-        }
-        .task(id: url) {
-            let targetURL = url
-            let loaded = await Task.detached(priority: .utility) {
-                ThumbnailCache.shared.thumbnail(for: targetURL)
-            }.value
-            self.image = loaded
         }
     }
 }

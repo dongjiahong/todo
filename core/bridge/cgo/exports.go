@@ -102,7 +102,7 @@ func NavLoadJSON() *C.char {
 	eng := engine
 	engMu.Unlock()
 	if eng == nil {
-		return strOut(`{"tasks":[],"tags":[],"seeded":false}`)
+		return strOut(`{"tasks":[],"tags":[],"lists":[],"seeded":false}`)
 	}
 	s, err := eng.LoadJSON()
 	if err != nil {
@@ -176,6 +176,47 @@ func NavDeleteTag(tagID *C.char) *C.char {
 		return strOut(`{"error":"engine not open"}`)
 	}
 	return errJSON(eng.DeleteTag(C.GoString(tagID)))
+}
+
+//export NavSaveListJSON
+func NavSaveListJSON(listJSON *C.char) *C.char {
+	engMu.Lock()
+	eng := engine
+	engMu.Unlock()
+	if eng == nil {
+		return strOut(`{"error":"engine not open"}`)
+	}
+	s, err := eng.SaveListJSON(C.GoString(listJSON))
+	if err != nil {
+		return errJSON(err)
+	}
+	return strOut(s)
+}
+
+//export NavDeleteList
+func NavDeleteList(listID *C.char) *C.char {
+	engMu.Lock()
+	eng := engine
+	engMu.Unlock()
+	if eng == nil {
+		return strOut(`{"error":"engine not open"}`)
+	}
+	return errJSON(eng.DeleteList(C.GoString(listID)))
+}
+
+//export NavClearCompleted
+func NavClearCompleted(listID *C.char) *C.char {
+	engMu.Lock()
+	eng := engine
+	engMu.Unlock()
+	if eng == nil {
+		return strOut(`{"error":"engine not open"}`)
+	}
+	s, err := eng.ClearCompleted(C.GoString(listID))
+	if err != nil {
+		return errJSON(err)
+	}
+	return strOut(s)
 }
 
 //export NavSaveAsset

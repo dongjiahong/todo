@@ -56,6 +56,18 @@ func (m *NavigatorMobile) DeleteTag(tagID string) error {
 	return m.engine.DeleteTag(tagID)
 }
 
+func (m *NavigatorMobile) SaveListJSON(listJSON string) (string, error) {
+	return m.engine.SaveListJSON(listJSON)
+}
+
+func (m *NavigatorMobile) DeleteList(listID string) error {
+	return m.engine.DeleteList(listID)
+}
+
+func (m *NavigatorMobile) ClearCompleted(listID string) (string, error) {
+	return m.engine.ClearCompleted(listID)
+}
+
 func (m *NavigatorMobile) SaveAsset(data []byte, ext string) (string, error) {
 	return m.engine.SaveAsset(data, ext)
 }

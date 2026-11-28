@@ -41,7 +41,7 @@ final class CoreBridge {
         let raw = takeString(NavLoadJSON())
         guard let data = raw.data(using: .utf8),
               let state = try? decoder.decode(BoardState.self, from: data) else {
-            return BoardState(tasks: [], tags: [], seeded: false)
+            return BoardState(tasks: [], tags: [], lists: [], seeded: false)
         }
         return state
     }
@@ -69,6 +69,33 @@ final class CoreBridge {
 
     func deleteTask(id: String, deleted: Bool) {
         _ = id.withCString { takeString(NavDeleteTask($0, deleted ? 1 : 0)) }
+    }
+
+    @discardableResult
+    func clearCompleted(listID: String?) -> [TaskItem] {
+        let target = listID ?? ""
+        let out = target.withCString { takeString(NavClearCompleted($0)) }
+        if let data = out.data(using: .utf8),
+           let list = try? decoder.decode([TaskItem].self, from: data) {
+            return list
+        }
+        return []
+    }
+
+    @discardableResult
+    func saveList(_ list: TaskListItem) -> TaskListItem {
+        guard let data = try? encoder.encode(list),
+              let json = String(data: data, encoding: .utf8) else { return list }
+        let out = json.withCString { takeString(NavSaveListJSON($0)) }
+        if let outData = out.data(using: .utf8),
+           let saved = try? decoder.decode(TaskListItem.self, from: outData) {
+            return saved
+        }
+        return list
+    }
+
+    func deleteList(id: String) {
+        _ = id.withCString { takeString(NavDeleteList($0)) }
     }
 
     @discardableResult

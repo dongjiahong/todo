@@ -45,7 +45,7 @@ func Open(dataDir string) (*Engine, error) {
 	}
 
 	eng := &Engine{store: st, syncer: sy}
-	eng.seedIfFirstRun()
+	eng.ensureDefaultListsAndMigrate()
 	_, _ = st.SnapshotDaily()
 	go func() { _ = st.PruneOrphanAssets(24 * time.Hour) }()
 	return eng, nil
@@ -84,7 +84,7 @@ func (e *Engine) SaveTaskJSON(taskJSON string) (string, error) {
 		t.UpdatedAt = now
 	}
 	t.Normalize()
-	merged, _, err := e.store.Upsert([]model.Task{t}, nil)
+	merged, _, _, err := e.store.Upsert([]model.Task{t}, nil, nil)
 	if err != nil {
 		return "", err
 	}
@@ -142,6 +142,10 @@ func (e *Engine) CompleteTask(taskID string, done bool) (string, error) {
 			Title:      target.Title,
 			Notes:      target.Notes,
 			Status:     model.StatusTodo,
+			ListID:     target.ListID,
+			Flagged:    target.Flagged,
+			Priority:   target.Priority,
+			URL:        target.URL,
 			Subtasks:   nextSubtasks,
 			TagIDs:     append([]string(nil), target.TagIDs...),
 			DueAt:      nextDue,
@@ -154,7 +158,7 @@ func (e *Engine) CompleteTask(taskID string, done bool) (string, error) {
 		toSave = append(toSave, next)
 	}
 
-	saved, _, err := e.store.Upsert(toSave, nil)
+	saved, _, _, err := e.store.Upsert(toSave, nil, nil)
 	if err != nil {
 		return "", err
 	}
@@ -175,7 +179,98 @@ func (e *Engine) DeleteTask(taskID string, deleted bool) error {
 		t.Stamps = map[string]int64{}
 	}
 	t.Stamps["deleted"] = now
-	_, _, err = e.store.Upsert([]model.Task{t}, nil)
+	_, _, _, err = e.store.Upsert([]model.Task{t}, nil, nil)
+	if err == nil {
+		e.syncer.Nudge()
+	}
+	return err
+}
+
+// ClearCompleted soft-deletes completed tasks (all if listID is empty, or only those in listID).
+func (e *Engine) ClearCompleted(listID string) (string, error) {
+	state, err := e.store.LoadAll()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UnixMilli()
+	var toUpdate []model.Task
+	for _, t := range state.Tasks {
+		if t.Deleted || t.Status != model.StatusDone {
+			continue
+		}
+		if listID != "" && t.ListID != listID {
+			continue
+		}
+		t.Deleted = true
+		t.UpdatedAt = now
+		if t.Stamps == nil {
+			t.Stamps = map[string]int64{}
+		}
+		t.Stamps["deleted"] = now
+		toUpdate = append(toUpdate, t)
+	}
+	if len(toUpdate) == 0 {
+		return "[]", nil
+	}
+	saved, _, _, err := e.store.Upsert(toUpdate, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	e.syncer.Nudge()
+	raw, err := json.Marshal(saved)
+	return string(raw), err
+}
+
+func (e *Engine) SaveListJSON(listJSON string) (string, error) {
+	var list model.TaskList
+	if err := json.Unmarshal([]byte(listJSON), &list); err != nil {
+		return "", err
+	}
+	if list.ID == "" {
+		list.ID = newID("list")
+	}
+	list.Normalize()
+	list.UpdatedAt = time.Now().UnixMilli()
+	_, _, saved, err := e.store.Upsert(nil, nil, []model.TaskList{list})
+	if err != nil {
+		return "", err
+	}
+	e.syncer.Nudge()
+	if len(saved) == 0 {
+		return listJSON, nil
+	}
+	raw, err := json.Marshal(saved[0])
+	return string(raw), err
+}
+
+func (e *Engine) DeleteList(listID string) error {
+	state, err := e.store.LoadAll()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	var updatedLists []model.TaskList
+	for _, l := range state.Lists {
+		if l.ID == listID {
+			l.Deleted = true
+			l.UpdatedAt = now
+			updatedLists = append(updatedLists, l)
+		}
+	}
+	var updatedTasks []model.Task
+	for _, t := range state.Tasks {
+		if t.Deleted || t.ListID != listID {
+			continue
+		}
+		t.Deleted = true
+		t.UpdatedAt = now
+		if t.Stamps == nil {
+			t.Stamps = map[string]int64{}
+		}
+		t.Stamps["deleted"] = now
+		updatedTasks = append(updatedTasks, t)
+	}
+	_, _, _, err = e.store.Upsert(updatedTasks, nil, updatedLists)
 	if err == nil {
 		e.syncer.Nudge()
 	}
@@ -194,7 +289,7 @@ func (e *Engine) SaveTagJSON(tagJSON string) (string, error) {
 		tag.Hue = model.HueBlue
 	}
 	tag.UpdatedAt = time.Now().UnixMilli()
-	_, saved, err := e.store.Upsert(nil, []model.Tag{tag})
+	_, saved, _, err := e.store.Upsert(nil, []model.Tag{tag}, nil)
 	if err != nil {
 		return "", err
 	}
@@ -244,7 +339,7 @@ func (e *Engine) DeleteTag(tagID string) error {
 			updatedTasks = append(updatedTasks, t)
 		}
 	}
-	_, _, err = e.store.Upsert(updatedTasks, updatedTags)
+	_, _, _, err = e.store.Upsert(updatedTasks, updatedTags, nil)
 	if err == nil {
 		e.syncer.Nudge()
 	}
@@ -317,47 +412,89 @@ func (e *Engine) ExportMarkdown() (string, error) {
 		}
 	}
 
+	writeTask := func(b *strings.Builder, t model.Task) {
+		mark := "[ ]"
+		if t.Status == model.StatusDone {
+			mark = "[x]"
+		}
+		prio := ""
+		switch t.Priority {
+		case 1:
+			prio = "! "
+		case 2:
+			prio = "!! "
+		case 3:
+			prio = "!!! "
+		}
+		b.WriteString(fmt.Sprintf("- %s %s**%s**", mark, prio, t.Title))
+		if t.Flagged {
+			b.WriteString(" 🚩")
+		}
+		if t.DueAt != "" {
+			b.WriteString(fmt.Sprintf(" (`%s`)", strings.ReplaceAll(t.DueAt, "T", " ")))
+		}
+		for _, tid := range t.TagIDs {
+			if lbl, ok := tagMap[tid]; ok {
+				b.WriteString(" #" + lbl)
+			}
+		}
+		b.WriteString("\n")
+		if strings.TrimSpace(t.URL) != "" {
+			b.WriteString(fmt.Sprintf("  - %s\n", strings.TrimSpace(t.URL)))
+		}
+		for _, st := range t.Subtasks {
+			sm := "[ ]"
+			if st.Done {
+				sm = "[x]"
+			}
+			b.WriteString(fmt.Sprintf("  - %s %s\n", sm, st.Title))
+		}
+		if strings.TrimSpace(t.Notes) != "" {
+			for _, line := range strings.Split(strings.TrimSpace(t.Notes), "\n") {
+				b.WriteString("  > " + line + "\n")
+			}
+		}
+	}
+
 	var b strings.Builder
-	b.WriteString("# 领航 Navigator 导出\n\n")
-	writeGroup := func(title string, status model.Status) {
-		b.WriteString("## " + title + "\n\n")
+	b.WriteString("# TODO 提醒事项导出\n\n")
+
+	activeLists := make([]model.TaskList, 0, len(state.Lists))
+	for _, l := range state.Lists {
+		if !l.Deleted {
+			activeLists = append(activeLists, l)
+		}
+	}
+	for _, list := range activeLists {
+		var listTasks []model.Task
 		for _, t := range state.Tasks {
-			if t.Deleted || t.Status != status {
-				continue
+			if !t.Deleted && t.Status != model.StatusDone && t.ListID == list.ID {
+				listTasks = append(listTasks, t)
 			}
-			mark := "[ ]"
-			if t.Status == model.StatusDone {
-				mark = "[x]"
-			}
-			b.WriteString(fmt.Sprintf("- %s **%s**", mark, t.Title))
-			if t.DueAt != "" {
-				b.WriteString(fmt.Sprintf(" (`%s`)", strings.ReplaceAll(t.DueAt, "T", " ")))
-			}
-			for _, tid := range t.TagIDs {
-				if lbl, ok := tagMap[tid]; ok {
-					b.WriteString(" #" + lbl)
-				}
-			}
-			b.WriteString("\n")
-			for _, st := range t.Subtasks {
-				sm := "[ ]"
-				if st.Done {
-					sm = "[x]"
-				}
-				b.WriteString(fmt.Sprintf("  - %s %s\n", sm, st.Title))
-			}
-			if strings.TrimSpace(t.Notes) != "" {
-				for _, line := range strings.Split(strings.TrimSpace(t.Notes), "\n") {
-					b.WriteString("  > " + line + "\n")
-				}
-			}
+		}
+		if len(listTasks) == 0 {
+			continue
+		}
+		b.WriteString("## " + list.Name + "\n\n")
+		for _, t := range listTasks {
+			writeTask(&b, t)
 		}
 		b.WriteString("\n")
 	}
 
-	writeGroup("进行中", model.StatusDoing)
-	writeGroup("待办", model.StatusTodo)
-	writeGroup("日志簿（已完成）", model.StatusDone)
+	var doneTasks []model.Task
+	for _, t := range state.Tasks {
+		if !t.Deleted && t.Status == model.StatusDone {
+			doneTasks = append(doneTasks, t)
+		}
+	}
+	if len(doneTasks) > 0 {
+		b.WriteString("## 已完成\n\n")
+		for _, t := range doneTasks {
+			writeTask(&b, t)
+		}
+		b.WriteString("\n")
+	}
 	return b.String(), nil
 }
 
@@ -366,29 +503,64 @@ func (e *Engine) ImportJSON(raw string) error {
 	if err := json.Unmarshal([]byte(raw), &state); err != nil {
 		return err
 	}
-	_, _, err := e.store.Upsert(state.Tasks, state.Tags)
+	_, _, _, err := e.store.Upsert(state.Tasks, state.Tags, state.Lists)
 	if err == nil {
 		e.syncer.Nudge()
 	}
 	return err
 }
 
-func (e *Engine) seedIfFirstRun() {
+func (e *Engine) ensureDefaultListsAndMigrate() {
 	state, err := e.store.LoadAll()
-	if err != nil || state.Seeded {
+	if err != nil {
 		return
 	}
 	now := time.Now().UnixMilli()
 
-	tags := []model.Tag{
-		{ID: "work", Label: "工作", Hue: model.HueBlue, Order: 0, UpdatedAt: now},
-		{ID: "personal", Label: "个人", Hue: model.HueGreen, Order: 1, UpdatedAt: now},
-		{ID: "study", Label: "学习", Hue: model.HuePurple, Order: 2, UpdatedAt: now},
-		{ID: "life", Label: "生活", Hue: model.HueAmber, Order: 3, UpdatedAt: now},
-		{ID: "urgent", Label: "紧急", Hue: model.HueRed, Order: 4, UpdatedAt: now},
+	// Ensure at least one default list ("提醒") exists.
+	hasActiveList := false
+	for _, l := range state.Lists {
+		if !l.Deleted {
+			hasActiveList = true
+			break
+		}
+	}
+	var seedLists []model.TaskList
+	if !hasActiveList {
+		seedLists = []model.TaskList{
+			{ID: model.DefaultListID, Name: "提醒", Color: "orange", Icon: "list", Order: 0, UpdatedAt: now},
+		}
 	}
 
-	_, _, _ = e.store.Upsert(nil, tags)
+	var seedTags []model.Tag
+	if !state.Seeded && len(state.Tags) == 0 {
+		seedTags = []model.Tag{
+			{ID: "work", Label: "工作", Hue: model.HueBlue, Order: 0, UpdatedAt: now},
+			{ID: "study", Label: "学习", Hue: model.HueGreen, Order: 1, UpdatedAt: now},
+			{ID: "life", Label: "生活", Hue: model.HueRed, Order: 2, UpdatedAt: now},
+		}
+	}
+
+	// One-time migration for legacy v2 databases: persist normalized tasks (doing->flagged, default listId).
+	var migratedTasks []model.Task
+	if e.store.GetMeta("migrated_reminders_v1") != "1" {
+		for _, t := range state.Tasks {
+			t.Normalize()
+			t.UpdatedAt = now
+			if t.Stamps == nil {
+				t.Stamps = map[string]int64{}
+			}
+			t.Stamps["status"] = now
+			t.Stamps["flagged"] = now
+			t.Stamps["listId"] = now
+			migratedTasks = append(migratedTasks, t)
+		}
+		_ = e.store.SetMeta("migrated_reminders_v1", "1")
+	}
+
+	if len(migratedTasks) > 0 || len(seedTags) > 0 || len(seedLists) > 0 {
+		_, _, _, _ = e.store.Upsert(migratedTasks, seedTags, seedLists)
+	}
 }
 
 func newID(prefix string) string {

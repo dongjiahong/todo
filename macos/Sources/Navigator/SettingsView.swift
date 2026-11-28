@@ -115,7 +115,7 @@ struct SettingsView: View {
 
             Section("关于") {
                 LabeledContent("应用名称", value: "TODO")
-                LabeledContent("版本", value: "0.2.0 (Native SwiftUI + Go Core)")
+                LabeledContent("版本", value: "0.3.0 (Native SwiftUI + Go Core)")
             }
         }
         .formStyle(.grouped)

@@ -6,6 +6,7 @@ import com.lele.navigator.model.SyncEvent
 import com.lele.navigator.model.SyncStatus
 import com.lele.navigator.model.TagItem
 import com.lele.navigator.model.TaskItem
+import com.lele.navigator.model.TaskListItem
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import mobile.EventListener
@@ -52,6 +53,20 @@ class CoreRepository(context: Context) {
 
     fun deleteTask(id: String, deleted: Boolean) {
         runCatching { engine.deleteTask(id, deleted) }
+    }
+
+    fun clearCompleted(listId: String?): List<TaskItem> {
+        val raw = runCatching { engine.clearCompleted(listId ?: "") }.getOrDefault("[]")
+        return runCatching { json.decodeFromString<List<TaskItem>>(raw) }.getOrDefault(emptyList())
+    }
+
+    fun saveList(list: TaskListItem) {
+        val raw = json.encodeToString(list)
+        runCatching { engine.saveListJSON(raw) }
+    }
+
+    fun deleteList(id: String) {
+        runCatching { engine.deleteList(id) }
     }
 
     fun saveTag(tag: TagItem) {

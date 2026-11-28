@@ -63,6 +63,7 @@ enum NotificationPermissionState: String {
 final class NavigatorStore {
     var tasks: [TaskItem] = []
     var tags: [TagItem] = []
+    var lists: [TaskListItem] = []
     var syncStatus: SyncStatus = SyncStatus()
     var dataDirPath: String = ""
     var notificationState: NotificationPermissionState = .unknown
@@ -74,9 +75,10 @@ final class NavigatorStore {
         }
     }
 
-    var section: NavSection = .today
-    var viewMode: ViewMode = .list
-    var selectedTaskID: String?
+    var section: NavSection = .all
+    var editingTaskID: String?
+    var inspectorTaskID: String?
+    var showCompletedInSection: Bool = false
     var searchQuery: String = ""
     var focusSearchTrigger: Int = 0
 
@@ -84,7 +86,8 @@ final class NavigatorStore {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "nav.appearance") }
     }
 
-    var showQuickCapture: Bool = false
+    var showAddListSheet: Bool = false
+    var editingList: TaskListItem?
     var showTagManager: Bool = false
     var showSettings: Bool = false
     var settingsTab: SettingsTab = .general
@@ -106,9 +109,25 @@ final class NavigatorStore {
         tags.filter { !$0.isDeleted }.sorted { $0.order < $1.order }
     }
 
-    var selectedTask: TaskItem? {
-        guard let id = selectedTaskID else { return nil }
-        return liveTasks.first { $0.id == id }
+    var liveLists: [TaskListItem] {
+        let active = lists.filter { !$0.isDeleted }.sorted { $0.order < $1.order }
+        if active.isEmpty {
+            return [TaskListItem(
+                id: TaskListItem.defaultID,
+                name: "提醒",
+                color: ListColor.orange.rawValue,
+                icon: ListIcon.list.rawValue,
+                order: 0,
+                updatedAt: 0,
+                deleted: false
+            )]
+        }
+        return active
+    }
+
+    func list(for id: String?) -> TaskListItem {
+        let target = (id?.isEmpty == false) ? id! : TaskListItem.defaultID
+        return liveLists.first(where: { $0.id == target }) ?? liveLists[0]
     }
 
     func bootstrap() {
@@ -126,7 +145,8 @@ final class NavigatorStore {
             onComplete: { [weak self] id in self?.toggleComplete(id: id) },
             onSnooze: { [weak self] id in self?.snoozeTask(id: id, hours: 1) },
             onOpen: { [weak self] id in
-                self?.selectedTaskID = id
+                self?.editingTaskID = id
+                self?.inspectorTaskID = id
                 NSApp.activate(ignoringOtherApps: true)
             }
         )
@@ -151,6 +171,7 @@ final class NavigatorStore {
         let state = bridge.loadBoard()
         self.tasks = state.tasks
         self.tags = state.tags
+        self.lists = state.lists ?? []
         refreshSystemChrome()
     }
 
@@ -162,12 +183,14 @@ final class NavigatorStore {
         }
     }
 
-    // MARK: - Filtered Collections
+    // MARK: - Smart Lists & Counts
 
     func matchesSearch(_ task: TaskItem) -> Bool {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if q.isEmpty { return true }
-        if task.title.lowercased().contains(q) || task.notes.lowercased().contains(q) {
+        if task.title.lowercased().contains(q)
+            || task.notes.lowercased().contains(q)
+            || task.cleanURL.lowercased().contains(q) {
             return true
         }
         if task.subtasks.contains(where: { $0.title.lowercased().contains(q) }) {
@@ -182,94 +205,164 @@ final class NavigatorStore {
         return false
     }
 
-    var todayOverdueTasks: [TaskItem] {
-        liveTasks.filter { !$0.isDone && DateHelper.isOverdue($0.dueAt) && matchesSearch($0) }
+    var todayTasks: [TaskItem] {
+        liveTasks.filter { !$0.isDone && (DateHelper.isOverdue($0.dueAt) || DateHelper.isDueToday($0.dueAt)) }
     }
 
-    var todayActiveTasks: [TaskItem] {
-        liveTasks.filter {
-            !$0.isDone && !DateHelper.isOverdue($0.dueAt) &&
-            (DateHelper.isDueToday($0.dueAt) || $0.status == .doing) &&
-            matchesSearch($0)
-        }
-    }
-
-    var todayCompletedTasks: [TaskItem] {
-        liveTasks.filter { $0.isDone && DateHelper.isCompletedToday($0.completedAt) && matchesSearch($0) }
-    }
-
-    var doingTasks: [TaskItem] {
-        liveTasks.filter { $0.status == .doing && matchesSearch($0) }
-    }
-
-    var todoTasks: [TaskItem] {
-        liveTasks.filter { $0.status == .todo && matchesSearch($0) }
-    }
-
-    var upcomingTasks: [TaskItem] {
-        liveTasks.filter { !$0.isDone && ($0.dueAt?.isEmpty == false) && matchesSearch($0) }
+    var scheduledTasks: [TaskItem] {
+        liveTasks.filter { !$0.isDone && ($0.dueAt?.isEmpty == false) }
             .sorted { ($0.dueAt ?? "") < ($1.dueAt ?? "") }
     }
 
-    var logbookTasks: [TaskItem] {
-        liveTasks.filter { $0.isDone && matchesSearch($0) }
+    var allActiveTasks: [TaskItem] {
+        liveTasks.filter { !$0.isDone }
+    }
+
+    var flaggedTasks: [TaskItem] {
+        liveTasks.filter { !$0.isDone && $0.isFlagged }
+    }
+
+    var completedTasks: [TaskItem] {
+        liveTasks.filter { $0.isDone }
             .sorted { ($0.completedAt ?? 0) > ($1.completedAt ?? 0) }
     }
 
-    func tasksForTag(_ tagID: String) -> [TaskItem] {
-        liveTasks.filter { !$0.isDone && $0.tagIds.contains(tagID) && matchesSearch($0) }
+    func activeTasks(in listID: String) -> [TaskItem] {
+        liveTasks.filter { !$0.isDone && $0.effectiveListID == listID }
     }
 
-    var attentionCount: Int {
-        liveTasks.filter { !$0.isDone && (DateHelper.isOverdue($0.dueAt) || DateHelper.isDueToday($0.dueAt)) }.count
+    func completedTasks(in listID: String) -> [TaskItem] {
+        liveTasks.filter { $0.isDone && $0.effectiveListID == listID }
+            .sorted { ($0.completedAt ?? 0) > ($1.completedAt ?? 0) }
     }
 
-    var doingCount: Int {
-        liveTasks.filter { $0.status == .doing }.count
+    func activeTasks(forTag tagID: String) -> [TaskItem] {
+        liveTasks.filter { !$0.isDone && $0.tagIds.contains(tagID) }
     }
 
-    var todoCount: Int {
-        liveTasks.filter { $0.status == .todo }.count
+    func allTaggedActiveTasks() -> [TaskItem] {
+        liveTasks.filter { !$0.isDone && !$0.tagIds.isEmpty }
+    }
+
+    var todayCount: Int { todayTasks.count }
+    var scheduledCount: Int { scheduledTasks.count }
+    var allActiveCount: Int { allActiveTasks.count }
+    var flaggedCount: Int { flaggedTasks.count }
+
+    var completedCountForCurrentSection: Int {
+        switch section {
+        case .all, .completed:
+            return completedTasks.count
+        case .today:
+            return liveTasks.filter { $0.isDone && DateHelper.isCompletedToday($0.completedAt) }.count
+        case .scheduled:
+            return liveTasks.filter { $0.isDone && ($0.dueAt?.isEmpty == false) }.count
+        case .flagged:
+            return liveTasks.filter { $0.isDone && $0.isFlagged }.count
+        case .list(let id):
+            return completedTasks(in: id).count
+        case .allTags:
+            return liveTasks.filter { $0.isDone && !$0.tagIds.isEmpty }.count
+        case .tag(let id):
+            return liveTasks.filter { $0.isDone && $0.tagIds.contains(id) }.count
+        }
+    }
+
+    var completedTasksForCurrentSection: [TaskItem] {
+        switch section {
+        case .all, .completed:
+            return completedTasks
+        case .today:
+            return liveTasks.filter { $0.isDone && DateHelper.isCompletedToday($0.completedAt) }
+                .sorted { ($0.completedAt ?? 0) > ($1.completedAt ?? 0) }
+        case .scheduled:
+            return liveTasks.filter { $0.isDone && ($0.dueAt?.isEmpty == false) }
+                .sorted { ($0.completedAt ?? 0) > ($1.completedAt ?? 0) }
+        case .flagged:
+            return liveTasks.filter { $0.isDone && $0.isFlagged }
+                .sorted { ($0.completedAt ?? 0) > ($1.completedAt ?? 0) }
+        case .list(let id):
+            return completedTasks(in: id)
+        case .allTags:
+            return liveTasks.filter { $0.isDone && !$0.tagIds.isEmpty }
+                .sorted { ($0.completedAt ?? 0) > ($1.completedAt ?? 0) }
+        case .tag(let id):
+            return liveTasks.filter { $0.isDone && $0.tagIds.contains(id) }
+                .sorted { ($0.completedAt ?? 0) > ($1.completedAt ?? 0) }
+        }
     }
 
     // MARK: - Task Mutations
 
     @discardableResult
-    func createTask(
-        title: String,
-        notes: String = "",
-        status: TaskStatus = .todo,
-        tagIds: [String] = [],
+    func createInlineTask(
+        in listID: String? = nil,
+        title: String = "",
         dueAt: String? = nil,
-        repeatRule: RepeatRule = .none
+        flagged: Bool = false,
+        tagIds: [String] = []
     ) -> TaskItem {
+        let targetListID: String
+        if let listID, !listID.isEmpty {
+            targetListID = listID
+        } else if case .list(let cur) = section {
+            targetListID = cur
+        } else {
+            targetListID = liveLists.first?.id ?? TaskListItem.defaultID
+        }
+
+        let effectiveDue: String? = dueAt ?? (section == .today ? DateHelper.presetDate(daysOffset: 0, hour: 18) : nil)
+        let effectiveFlagged = flagged || (section == .flagged)
+        var effectiveTags = tagIds
+        if case .tag(let tid) = section, !effectiveTags.contains(tid) {
+            effectiveTags.append(tid)
+        }
+
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let minRank = liveTasks.map(\.rank).min() ?? 1000
+        let maxRank = liveTasks.map(\.rank).max() ?? 0
         let item = TaskItem(
             id: "t_\(UUID().uuidString.prefix(12).lowercased())",
             title: title,
-            notes: notes,
-            status: status,
+            notes: "",
+            status: .todo,
+            listId: targetListID,
+            flagged: effectiveFlagged,
+            priority: 0,
+            url: nil,
             subtasks: [],
-            tagIds: tagIds,
-            dueAt: dueAt,
-            repeatRule: dueAt == nil ? .none : repeatRule,
+            tagIds: effectiveTags,
+            dueAt: effectiveDue,
+            repeatRule: RepeatRule.none,
             attachments: [],
-            rank: minRank - 100,
+            rank: maxRank + 1000,
             completedAt: nil,
             createdAt: now,
             updatedAt: now,
             deleted: false,
             stamps: [
                 "title": now, "notes": now, "status": now,
-                "subtasks": now, "tagIds": now, "dueAt": now,
-                "repeatRule": now, "rank": now, "deleted": now
+                "listId": now, "flagged": now, "priority": now,
+                "url": now, "subtasks": now, "tagIds": now,
+                "dueAt": now, "repeatRule": now, "rank": now, "deleted": now
             ]
         )
         let saved = bridge.saveTask(item)
         reload()
-        selectedTaskID = saved.id
+        editingTaskID = saved.id
         return saved
+    }
+
+    func commitInlineEditIfEmpty(id: String) {
+        guard let task = liveTasks.first(where: { $0.id == id }) else { return }
+        if task.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && task.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && task.subtasks.isEmpty
+            && task.attachmentList.isEmpty {
+            bridge.deleteTask(id: id, deleted: true)
+            if editingTaskID == id { editingTaskID = nil }
+            if inspectorTaskID == id { inspectorTaskID = nil }
+            reload()
+        }
     }
 
     func patchTask(id: String, rescheduleNotifications: Bool = true, mutate: (inout TaskItem, Int64) -> Void) {
@@ -303,25 +396,32 @@ final class NavigatorStore {
         let snapshot = task
         pendingSaves.removeValue(forKey: id)?.cancel()
         pendingSaves[id] = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled, let self else { return }
             self.bridge.saveTask(snapshot)
             self.pendingSaves.removeValue(forKey: id)
         }
     }
 
-    func moveTask(id: String, to status: TaskStatus) {
-        if status == .done {
-            toggleComplete(id: id, forceDone: true)
-            return
+    func toggleFlag(id: String) {
+        patchTask(id: id, rescheduleNotifications: false) { t, now in
+            t.flagged = !t.isFlagged
+            t.stamps?["flagged"] = now
         }
-        patchTask(id: id) { t, now in
-            t.status = status
-            t.completedAt = nil
-            t.stamps?["status"] = now
-            t.stamps?["completedAt"] = now
+    }
+
+    func setPriority(id: String, priority: TaskPriority) {
+        patchTask(id: id, rescheduleNotifications: false) { t, now in
+            t.priority = priority.rawValue
+            t.stamps?["priority"] = now
         }
-        reload()
+    }
+
+    func moveTaskToList(id: String, listID: String) {
+        patchTask(id: id, rescheduleNotifications: false) { t, now in
+            t.listId = listID
+            t.stamps?["listId"] = now
+        }
     }
 
     func toggleComplete(id: String, forceDone: Bool? = nil) {
@@ -330,9 +430,10 @@ final class NavigatorStore {
         let nextDone = forceDone ?? !task.isDone
         let saved = bridge.completeTask(id: id, done: nextDone)
         let spawned = nextDone ? saved.first(where: { $0.id != id }) : nil
+        if nextDone && editingTaskID == id { editingTaskID = nil }
         reload()
         if nextDone {
-            showUndo(message: "已完成「\(task.title.isEmpty ? "未命名任务" : task.title)」") { [weak self] in
+            showUndo(message: "已完成「\(task.title.isEmpty ? "未命名提醒" : task.title)」") { [weak self] in
                 guard let self else { return }
                 _ = self.bridge.completeTask(id: id, done: false)
                 if let spawned {
@@ -343,18 +444,36 @@ final class NavigatorStore {
         }
     }
 
+    func clearCompletedForCurrentSection() {
+        let listFilter: String?
+        if case .list(let id) = section {
+            listFilter = id
+        } else {
+            listFilter = nil
+        }
+        let cleared = bridge.clearCompleted(listID: listFilter)
+        guard !cleared.isEmpty else { return }
+        reload()
+        let clearedIDs = cleared.map(\.id)
+        showUndo(message: "已清除 \(cleared.count) 项已完成提醒") { [weak self] in
+            guard let self else { return }
+            for id in clearedIDs {
+                self.bridge.deleteTask(id: id, deleted: false)
+            }
+            self.reload()
+        }
+    }
+
     func deleteTask(id: String) {
         guard let task = liveTasks.first(where: { $0.id == id }) else { return }
-        if selectedTaskID == id {
-            selectedTaskID = nil
-        }
+        if editingTaskID == id { editingTaskID = nil }
+        if inspectorTaskID == id { inspectorTaskID = nil }
         bridge.deleteTask(id: id, deleted: true)
         reload()
-        showUndo(message: "已删除「\(task.title.isEmpty ? "未命名任务" : task.title)」") { [weak self] in
+        showUndo(message: "已删除「\(task.title.isEmpty ? "未命名提醒" : task.title)」") { [weak self] in
             guard let self else { return }
             self.bridge.deleteTask(id: id, deleted: false)
             self.reload()
-            self.selectedTaskID = id
         }
     }
 
@@ -368,12 +487,49 @@ final class NavigatorStore {
         reload()
     }
 
+    // MARK: - Lists
+
+    func createList(name: String, color: ListColor, icon: ListIcon) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let order = (liveLists.map(\.order).max() ?? -1) + 1
+        let list = TaskListItem(
+            id: "list_\(UUID().uuidString.prefix(8).lowercased())",
+            name: clean,
+            color: color.rawValue,
+            icon: icon.rawValue,
+            order: order,
+            updatedAt: now,
+            deleted: false
+        )
+        let saved = bridge.saveList(list)
+        reload()
+        section = .list(saved.id)
+    }
+
+    func updateList(_ list: TaskListItem) {
+        var copy = list
+        copy.updatedAt = Int64(Date().timeIntervalSince1970 * 1000)
+        bridge.saveList(copy)
+        reload()
+    }
+
+    func deleteList(id: String) {
+        guard liveLists.count > 1 else { return }
+        bridge.deleteList(id: id)
+        if case .list(let cur) = section, cur == id {
+            section = .all
+        }
+        reload()
+    }
+
     // MARK: - Structured Subtasks
 
     func addSubtask(to taskID: String, title: String) {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        patchTask(id: taskID) { t, now in
+        patchTask(id: taskID, rescheduleNotifications: false) { t, now in
             let nextOrder = (t.subtasks.map(\.order).max() ?? -1) + 1
             t.subtasks.append(SubtaskItem(
                 id: "s_\(UUID().uuidString.prefix(8).lowercased())",
@@ -386,7 +542,7 @@ final class NavigatorStore {
     }
 
     func toggleSubtask(taskID: String, subtaskID: String) {
-        patchTask(id: taskID) { t, now in
+        patchTask(id: taskID, rescheduleNotifications: false) { t, now in
             if let idx = t.subtasks.firstIndex(where: { $0.id == subtaskID }) {
                 t.subtasks[idx].done.toggle()
                 t.stamps?["subtasks"] = now
@@ -404,7 +560,7 @@ final class NavigatorStore {
     }
 
     func deleteSubtask(taskID: String, subtaskID: String) {
-        patchTask(id: taskID) { t, now in
+        patchTask(id: taskID, rescheduleNotifications: false) { t, now in
             t.subtasks.removeAll { $0.id == subtaskID }
             t.stamps?["subtasks"] = now
         }
@@ -415,7 +571,7 @@ final class NavigatorStore {
     func attachImage(to taskID: String, data: Data, ext: String = "png") {
         let name = bridge.saveAsset(data: data, ext: ext)
         guard !name.isEmpty else { return }
-        patchTask(id: taskID) { t, now in
+        patchTask(id: taskID, rescheduleNotifications: false) { t, now in
             var list = t.attachmentList
             guard list.count < 6, !list.contains(name) else { return }
             list.append(name)
@@ -425,7 +581,7 @@ final class NavigatorStore {
     }
 
     func removeAttachment(from taskID: String, name: String) {
-        patchTask(id: taskID) { t, now in
+        patchTask(id: taskID, rescheduleNotifications: false) { t, now in
             t.attachments = t.attachmentList.filter { $0 != name }
             t.stamps?["attachments"] = now
         }
@@ -465,7 +621,7 @@ final class NavigatorStore {
     func deleteTag(id: String) {
         bridge.deleteTag(id: id)
         if case .tag(let active) = section, active == id {
-            section = .today
+            section = .all
         }
         reload()
     }
@@ -561,7 +717,7 @@ final class NavigatorStore {
     }
 
     private func refreshSystemChrome(rescheduleNotifications: Bool = true) {
-        let count = attentionCount
+        let count = todayCount
         NSApplication.shared.dockTile.badgeLabel = count == 0 ? nil : (count > 99 ? "99+" : "\(count)")
         if rescheduleNotifications {
             notifications.reschedule(tasks: liveTasks, leadMinutes: leadReminderMinutes)
@@ -632,7 +788,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         content.title = "TODO 通知测试"
-        content.body = "通知权限已正常生效，到期任务会准时提醒你。"
+        content.body = "通知权限已正常生效，到期提醒会准时送达。"
         content.sound = .default
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 2, repeats: false)
         let req = UNNotificationRequest(identifier: "todo.test.\(UUID().uuidString)", content: content, trigger: trigger)
@@ -649,8 +805,8 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             let interval = due.timeIntervalSince(now)
             if interval > 1 {
                 let content = UNMutableNotificationContent()
-                content.title = task.title.isEmpty ? "任务到期" : task.title
-                content.body = task.notes.isEmpty ? "截止时间到了" : task.notes
+                content.title = task.title.isEmpty ? "提醒到期" : task.title
+                content.body = task.notes.isEmpty ? "设定的提醒时间到了" : task.notes
                 content.sound = .default
                 content.categoryIdentifier = categoryID
 
@@ -663,7 +819,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 let earlyInterval = interval - TimeInterval(leadMinutes * 60)
                 if earlyInterval > 1 {
                     let early = UNMutableNotificationContent()
-                    early.title = "即将到期：\(task.title.isEmpty ? "未命名任务" : task.title)"
+                    early.title = "即将到期：\(task.title.isEmpty ? "未命名提醒" : task.title)"
                     early.body = "距离截止还有 \(leadMinutes) 分钟"
                     early.sound = .default
                     early.categoryIdentifier = categoryID

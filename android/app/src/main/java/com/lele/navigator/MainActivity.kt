@@ -30,8 +30,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lele.navigator.model.DateUtils
+import com.lele.navigator.model.TaskListItem
 import com.lele.navigator.ui.*
-import com.lele.navigator.ui.components.ThingsMagicFab
 import com.lele.navigator.ui.theme.NavigatorThingsTheme
 import com.lele.navigator.ui.theme.ThingsTheme
 import kotlinx.coroutines.delay
@@ -72,11 +72,12 @@ fun NavigatorRoot(vm: NavigatorViewModel = viewModel()) {
     val c = ThingsTheme.colors
     val context = LocalContext.current
     val state by vm.state.collectAsState()
-    var route by remember { mutableStateOf<NavRoute>(NavRoute.Today) }
-    var openTaskId by remember { mutableStateOf<String?>(null) }
+    var route by remember { mutableStateOf<NavRoute>(NavRoute.Overview) }
+    var inspectorTaskId by remember { mutableStateOf<String?>(null) }
     var quickQuery by remember { mutableStateOf("") }
     var showCapture by remember { mutableStateOf(false) }
-    var showSearch by remember { mutableStateOf(false) }
+    var showAddList by remember { mutableStateOf(false) }
+    var editingList by remember { mutableStateOf<TaskListItem?>(null) }
     var showSyncSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showTagSheet by remember { mutableStateOf(false) }
@@ -86,10 +87,10 @@ fun NavigatorRoot(vm: NavigatorViewModel = viewModel()) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    val detailTask = openTaskId?.let { id -> state.liveTasks.firstOrNull { it.id == id } }
-    LaunchedEffect(openTaskId, detailTask) {
-        if (openTaskId != null && detailTask == null) {
-            openTaskId = null
+    val inspectorTask = inspectorTaskId?.let { id -> state.liveTasks.firstOrNull { it.id == id } }
+    LaunchedEffect(inspectorTaskId, inspectorTask) {
+        if (inspectorTaskId != null && inspectorTask == null) {
+            inspectorTaskId = null
         }
     }
 
@@ -106,22 +107,12 @@ fun NavigatorRoot(vm: NavigatorViewModel = viewModel()) {
         vm.clearUndo()
     }
 
-    // Single always-mounted BackHandler so Android 15 Predictive Back never loses registration
     BackHandler(enabled = true) {
         when {
-            openTaskId != null -> openTaskId = null
-            showSearch -> {
-                showSearch = false
-                vm.setSearch("")
-            }
-            route == NavRoute.Overview && quickQuery.isNotEmpty() -> {
-                quickQuery = ""
-            }
-            route != NavRoute.Overview -> {
-                showSearch = false
-                vm.setSearch("")
-                route = NavRoute.Overview
-            }
+            inspectorTaskId != null -> inspectorTaskId = null
+            state.editingTaskId != null -> vm.setEditingTask(null)
+            route == NavRoute.Overview && quickQuery.isNotEmpty() -> quickQuery = ""
+            route != NavRoute.Overview -> route = NavRoute.Overview
             else -> {
                 val now = System.currentTimeMillis()
                 if (now - lastBackPressMs < 2000L) {
@@ -134,161 +125,182 @@ fun NavigatorRoot(vm: NavigatorViewModel = viewModel()) {
         }
     }
 
-    if (detailTask != null) {
-        TaskDetailScreen(
-            task = detailTask,
-            tags = state.liveTags,
-            vm = vm,
-            onBack = { openTaskId = null }
-        )
-    } else {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(if (route == NavRoute.Overview) c.hubBackground else c.listBackground)
-        ) {
-            AnimatedContent(
-                targetState = route,
-                transitionSpec = {
-                    val goingToOverview = targetState == NavRoute.Overview
-                    if (goingToOverview) {
-                        (slideInHorizontally(tween(220)) { -it / 5 } + fadeIn(tween(220)))
-                            .togetherWith(slideOutHorizontally(tween(220)) { it / 4 } + fadeOut(tween(180)))
-                    } else {
-                        (slideInHorizontally(tween(220)) { it / 4 } + fadeIn(tween(220)))
-                            .togetherWith(slideOutHorizontally(tween(220)) { -it / 5 } + fadeOut(tween(180)))
-                    }
-                },
-                label = "routeTransition"
-            ) { targetRoute ->
-                when (targetRoute) {
-                    NavRoute.Overview -> OverviewScreen(
-                        state = state,
-                        vm = vm,
-                        quickQuery = quickQuery,
-                        onQuickQueryChange = { quickQuery = it },
-                        onNavigate = { next ->
-                            showSearch = false
-                            vm.setSearch("")
-                            route = next
-                        },
-                        onOpenTask = { openTaskId = it },
-                        onOpenSync = { showSyncSheet = true },
-                        onOpenSettings = { showSettingsSheet = true },
-                        onOpenTagManager = { showTagSheet = true }
-                    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(if (route == NavRoute.Overview) c.hubBackground else c.listBackground)
+    ) {
+        AnimatedContent(
+            targetState = route,
+            transitionSpec = {
+                val goingToOverview = targetState == NavRoute.Overview
+                if (goingToOverview) {
+                    (slideInHorizontally(tween(220)) { -it / 5 } + fadeIn(tween(220)))
+                        .togetherWith(slideOutHorizontally(tween(220)) { it / 4 } + fadeOut(tween(180)))
+                } else {
+                    (slideInHorizontally(tween(220)) { it / 4 } + fadeIn(tween(220)))
+                        .togetherWith(slideOutHorizontally(tween(220)) { -it / 5 } + fadeOut(tween(180)))
+                }
+            },
+            label = "routeTransition"
+        ) { targetRoute ->
+            when (targetRoute) {
+                NavRoute.Overview -> OverviewScreen(
+                    state = state,
+                    vm = vm,
+                    quickQuery = quickQuery,
+                    onQuickQueryChange = { quickQuery = it },
+                    onNavigate = { next ->
+                        quickQuery = ""
+                        route = next
+                    },
+                    onOpenInspector = { inspectorTaskId = it },
+                    onNewReminder = { showCapture = true },
+                    onAddList = {
+                        editingList = null
+                        showAddList = true
+                    },
+                    onEditList = { list ->
+                        editingList = list
+                        showAddList = true
+                    },
+                    onOpenSync = { showSyncSheet = true },
+                    onOpenSettings = { showSettingsSheet = true },
+                    onOpenTagManager = { showTagSheet = true }
+                )
 
-                    else -> {
-                        PullToRefreshBox(
-                            isRefreshing = refreshing,
-                            onRefresh = {
-                                refreshing = true
-                                vm.syncNow()
-                                scope.launch {
-                                    delay(600)
-                                    refreshing = false
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            TaskListScreen(
-                                route = targetRoute,
-                                state = state,
-                                vm = vm,
-                                showSearch = showSearch,
-                                onToggleSearch = {
-                                    showSearch = !showSearch
-                                    if (!showSearch) vm.setSearch("")
-                                },
-                                onBackToLists = {
-                                    showSearch = false
-                                    vm.setSearch("")
-                                    route = NavRoute.Overview
-                                },
-                                onOpenTask = { openTaskId = it },
-                                onOpenSync = { showSyncSheet = true }
-                            )
-                        }
+                else -> {
+                    PullToRefreshBox(
+                        isRefreshing = refreshing,
+                        onRefresh = {
+                            refreshing = true
+                            vm.syncNow()
+                            scope.launch {
+                                delay(600)
+                                refreshing = false
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        TaskListScreen(
+                            route = targetRoute,
+                            state = state,
+                            vm = vm,
+                            onBackToLists = { route = NavRoute.Overview },
+                            onOpenInspector = { inspectorTaskId = it }
+                        )
                     }
                 }
             }
+        }
 
-            if (route != NavRoute.Logbook) {
-                ThingsMagicFab(
-                    onClick = { showCapture = true },
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 68.dp)
+        ) { data ->
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = if (c.isDark) Color(0xFF2D323E) else Color(0xFF1F2430),
+                contentColor = Color.White,
+                shadowElevation = 6.dp
+            ) {
+                Row(
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .navigationBarsPadding()
-                        .padding(end = 22.dp, bottom = if (route == NavRoute.Overview) 68.dp else 22.dp)
-                )
-            }
-
-            SnackbarHost(
-                hostState = snackbarHostState,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(
-                        start = 16.dp,
-                        end = 16.dp,
-                        bottom = when {
-                            route == NavRoute.Logbook -> 16.dp
-                            route == NavRoute.Overview -> 132.dp
-                            else -> 88.dp
-                        }
-                    )
-            ) { data ->
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (c.isDark) Color(0xFF2D323E) else Color(0xFF1F2430),
-                    contentColor = Color.White,
-                    shadowElevation = 6.dp
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Text(
+                        text = data.visuals.message,
+                        fontSize = 14.sp,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    data.visuals.actionLabel?.let { label ->
+                        Spacer(Modifier.width(12.dp))
                         Text(
-                            text = data.visuals.message,
+                            text = label,
                             fontSize = 14.sp,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF66A3FF),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { data.performAction() }
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
                         )
-                        data.visuals.actionLabel?.let { label ->
-                            Spacer(Modifier.width(12.dp))
-                            Text(
-                                text = label,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF66A3FF),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { data.performAction() }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
-                        }
                     }
                 }
             }
         }
     }
 
+    if (inspectorTask != null) {
+        TaskInspectorSheet(
+            task = inspectorTask,
+            lists = state.liveLists,
+            tags = state.liveTags,
+            vm = vm,
+            onDismiss = { inspectorTaskId = null }
+        )
+    }
+
     if (showCapture) {
-        val defaultStatus = if (route == NavRoute.Doing) "doing" else "todo"
+        val defaultListId = when (val r = route) {
+            is NavRoute.CustomList -> r.listId
+            else -> state.liveLists.first().id
+        }
+        val defaultFlagged = route == NavRoute.Flagged
         val defaultDue = if (route == NavRoute.Today) DateUtils.presetDue(0, 18) else null
         val defaultTags = if (route is NavRoute.Tag) listOf((route as NavRoute.Tag).tagId) else emptyList()
         QuickCaptureSheet(
+            lists = state.liveLists,
             tags = state.liveTags,
-            defaultStatus = defaultStatus,
+            defaultListId = defaultListId,
+            defaultFlagged = defaultFlagged,
             defaultDue = defaultDue,
             defaultTagIds = defaultTags,
             onDismiss = { showCapture = false },
-            onSave = { title, status, tagIds, dueAt ->
-                vm.createTask(title, status, tagIds, dueAt)
+            onSave = { title, listId, flagged, tagIds, dueAt ->
+                vm.createInlineTask(
+                    listId = listId,
+                    title = title,
+                    dueAt = dueAt,
+                    flagged = flagged,
+                    tagIds = tagIds,
+                    focusInline = false
+                )
+            }
+        )
+    }
+
+    if (showAddList) {
+        AddListSheet(
+            editing = editingList,
+            canDelete = state.liveLists.size > 1,
+            onDismiss = {
+                showAddList = false
+                editingList = null
+            },
+            onSave = { name, color, icon ->
+                val cur = editingList
+                if (cur != null) {
+                    vm.updateList(cur.copy(name = name, color = color, icon = icon))
+                } else {
+                    vm.createList(name, color, icon)
+                }
+            },
+            onDelete = editingList?.let { target ->
+                {
+                    vm.deleteList(target.id)
+                    if (route == NavRoute.CustomList(target.id)) {
+                        route = NavRoute.Overview
+                    }
+                }
             }
         )
     }

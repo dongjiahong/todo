@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS tags (
 );
 CREATE INDEX IF NOT EXISTS idx_tags_updated ON tags(updated_at);
 
+CREATE TABLE IF NOT EXISTS lists (
+  id         TEXT PRIMARY KEY,
+  body       TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  deleted    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_lists_updated ON lists(updated_at);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -119,10 +127,22 @@ func (s *Store) LoadAll() (model.BoardState, error) {
 		return tags[i].ID < tags[j].ID
 	})
 
+	lists, err := s.queryLists("SELECT body FROM lists", nil)
+	if err != nil {
+		return model.BoardState{}, err
+	}
+	sort.SliceStable(lists, func(i, j int) bool {
+		if lists[i].Order != lists[j].Order {
+			return lists[i].Order < lists[j].Order
+		}
+		return lists[i].ID < lists[j].ID
+	})
+
 	seeded := s.getMetaLocked("seeded") == "1"
 	return model.BoardState{
 		Tasks:  tasks,
 		Tags:   tags,
+		Lists:  lists,
 		Seeded: seeded,
 	}, nil
 }
@@ -148,17 +168,21 @@ func (s *Store) GetTask(id string) (model.Task, bool, error) {
 	return t, true, nil
 }
 
-func (s *Store) ChangesSince(since int64) ([]model.Task, []model.Tag, int64, error) {
+func (s *Store) ChangesSince(since int64) ([]model.Task, []model.Tag, []model.TaskList, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tasks, err := s.queryTasks("SELECT body FROM tasks WHERE updated_at >= ?", &since)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
 	}
 	tags, err := s.queryTags("SELECT body FROM tags WHERE updated_at >= ?", &since)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
+	}
+	lists, err := s.queryLists("SELECT body FROM lists WHERE updated_at >= ?", &since)
+	if err != nil {
+		return nil, nil, nil, 0, err
 	}
 
 	var at sql.NullInt64
@@ -167,18 +191,20 @@ func (s *Store) ChangesSince(since int64) ([]model.Task, []model.Tag, int64, err
 			SELECT MAX(updated_at) AS m FROM tasks
 			UNION ALL
 			SELECT MAX(updated_at) AS m FROM tags
+			UNION ALL
+			SELECT MAX(updated_at) AS m FROM lists
 		)
 	`).Scan(&at)
-	return tasks, tags, at.Int64, nil
+	return tasks, tags, lists, at.Int64, nil
 }
 
-func (s *Store) Upsert(tasks []model.Task, tags []model.Tag) ([]model.Task, []model.Tag, error) {
+func (s *Store) Upsert(tasks []model.Task, tags []model.Tag, lists []model.TaskList) ([]model.Task, []model.Tag, []model.TaskList, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -197,12 +223,12 @@ func (s *Store) Upsert(tasks []model.Task, tags []model.Tag) ([]model.Task, []mo
 				final = model.MergeTask(existing, incoming)
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		raw, err := json.Marshal(final)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		del := 0
 		if final.Deleted {
@@ -219,7 +245,7 @@ func (s *Store) Upsert(tasks []model.Task, tags []model.Tag) ([]model.Task, []mo
 			WHERE excluded.updated_at >= tasks.updated_at
 		`, final.ID, string(raw), final.UpdatedAt, string(final.Status), del)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		mergedTasks = append(mergedTasks, final)
 	}
@@ -238,12 +264,12 @@ func (s *Store) Upsert(tasks []model.Task, tags []model.Tag) ([]model.Task, []mo
 				final = model.MergeTag(existing, incoming)
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		raw, err := json.Marshal(final)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		del := 0
 		if final.Deleted {
@@ -259,16 +285,57 @@ func (s *Store) Upsert(tasks []model.Task, tags []model.Tag) ([]model.Task, []mo
 			WHERE excluded.updated_at >= tags.updated_at
 		`, final.ID, string(raw), final.UpdatedAt, del)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		mergedTags = append(mergedTags, final)
 	}
 
+	mergedLists := make([]model.TaskList, 0, len(lists))
+	for _, incoming := range lists {
+		if incoming.ID == "" {
+			continue
+		}
+		incoming.Normalize()
+		var existingBody string
+		err := tx.QueryRow("SELECT body FROM lists WHERE id = ?", incoming.ID).Scan(&existingBody)
+		final := incoming
+		if err == nil {
+			var existing model.TaskList
+			if json.Unmarshal([]byte(existingBody), &existing) == nil {
+				final = model.MergeList(existing, incoming)
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, nil, err
+		}
+
+		raw, err := json.Marshal(final)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		del := 0
+		if final.Deleted {
+			del = 1
+		}
+		_, err = tx.Exec(`
+			INSERT INTO lists (id, body, updated_at, deleted)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				body = excluded.body,
+				updated_at = excluded.updated_at,
+				deleted = excluded.deleted
+			WHERE excluded.updated_at >= lists.updated_at
+		`, final.ID, string(raw), final.UpdatedAt, del)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		mergedLists = append(mergedLists, final)
+	}
+
 	_, _ = tx.Exec(`INSERT INTO meta (key, value) VALUES ('seeded', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`)
 	if err := tx.Commit(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return mergedTasks, mergedTags, nil
+	return mergedTasks, mergedTags, mergedLists, nil
 }
 
 func (s *Store) GetMeta(key string) string {
@@ -342,6 +409,34 @@ func (s *Store) queryTags(q string, since *int64) ([]model.Tag, error) {
 		var t model.Tag
 		if json.Unmarshal([]byte(body), &t) == nil {
 			out = append(out, t)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) queryLists(q string, since *int64) ([]model.TaskList, error) {
+	var rows *sql.Rows
+	var err error
+	if since != nil {
+		rows, err = s.db.Query(q, *since)
+	} else {
+		rows, err = s.db.Query(q)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]model.TaskList, 0)
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		var l model.TaskList
+		if json.Unmarshal([]byte(body), &l) == nil {
+			l.Normalize()
+			out = append(out, l)
 		}
 	}
 	return out, rows.Err()
