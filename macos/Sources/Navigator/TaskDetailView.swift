@@ -10,7 +10,6 @@ struct TaskInspectorPopover: View {
     @State private var title: String = ""
     @State private var notes: String = ""
     @State private var urlText: String = ""
-    @State private var newSubtaskTitle: String = ""
     @State private var showDatePicker: Bool = false
     @State private var pickerDate: Date = Date()
     @State private var showTagPicker: Bool = false
@@ -329,62 +328,6 @@ struct TaskInspectorPopover: View {
                                 }
                             }
                         }
-                    }
-
-                    Divider()
-
-                    // 子任务 (preserving structured subtasks cleanly inside Inspector)
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("子任务")
-                                .font(.system(size: 12.5, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            if task.checklistTotalCount > 0 {
-                                Text("\(task.checklistDoneCount)/\(task.checklistTotalCount)")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                            }
-                        }
-
-                        ForEach(task.subtasks) { st in
-                            HStack(spacing: 6) {
-                                TaskCheckbox(checked: st.done, tint: NavTheme.accentBlue, size: 14) {
-                                    store.toggleSubtask(taskID: taskID, subtaskID: st.id)
-                                }
-                                TextField("", text: Binding(
-                                    get: { st.title },
-                                    set: { store.updateSubtaskTitle(taskID: taskID, subtaskID: st.id, title: $0) }
-                                ))
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 12.5))
-                                .strikethrough(st.done)
-                                .foregroundStyle(st.done ? .secondary : .primary)
-
-                                Button {
-                                    store.deleteSubtask(taskID: taskID, subtaskID: st.id)
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.tertiary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-
-                        HStack(spacing: 6) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                            TextField("添加子任务，回车确认", text: $newSubtaskTitle)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 12.5))
-                                .onSubmit {
-                                    store.addSubtask(to: taskID, title: newSubtaskTitle)
-                                    newSubtaskTitle = ""
-                                }
-                        }
-                        .padding(.top, 2)
                     }
 
                     Divider()

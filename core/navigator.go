@@ -407,7 +407,7 @@ func (e *Engine) ExportMarkdown() (string, error) {
 		}
 	}
 
-	writeTask := func(b *strings.Builder, t model.Task) {
+	writeTask := func(b *strings.Builder, t model.Task, indent string) {
 		mark := "[ ]"
 		if t.Status == model.StatusDone {
 			mark = "[x]"
@@ -421,7 +421,7 @@ func (e *Engine) ExportMarkdown() (string, error) {
 		case 3:
 			prio = "!!! "
 		}
-		b.WriteString(fmt.Sprintf("- %s %s**%s**", mark, prio, t.Title))
+		b.WriteString(fmt.Sprintf("%s- %s %s**%s**", indent, mark, prio, t.Title))
 		if t.Flagged {
 			b.WriteString(" 🚩")
 		}
@@ -435,18 +435,18 @@ func (e *Engine) ExportMarkdown() (string, error) {
 		}
 		b.WriteString("\n")
 		if strings.TrimSpace(t.URL) != "" {
-			b.WriteString(fmt.Sprintf("  - %s\n", strings.TrimSpace(t.URL)))
+			b.WriteString(fmt.Sprintf("%s  - %s\n", indent, strings.TrimSpace(t.URL)))
 		}
 		for _, st := range t.Subtasks {
 			sm := "[ ]"
 			if st.Done {
 				sm = "[x]"
 			}
-			b.WriteString(fmt.Sprintf("  - %s %s\n", sm, st.Title))
+			b.WriteString(fmt.Sprintf("%s  - %s %s\n", indent, sm, st.Title))
 		}
 		if strings.TrimSpace(t.Notes) != "" {
 			for _, line := range strings.Split(strings.TrimSpace(t.Notes), "\n") {
-				b.WriteString("  > " + line + "\n")
+				b.WriteString(indent + "  > " + line + "\n")
 			}
 		}
 	}
@@ -470,9 +470,25 @@ func (e *Engine) ExportMarkdown() (string, error) {
 		if len(listTasks) == 0 {
 			continue
 		}
-		b.WriteString("## " + list.Name + "\n\n")
+		present := make(map[string]bool, len(listTasks))
 		for _, t := range listTasks {
-			writeTask(&b, t)
+			present[t.ID] = true
+		}
+		children := make(map[string][]model.Task)
+		var topLevel []model.Task
+		for _, t := range listTasks {
+			if t.ParentID != "" && present[t.ParentID] {
+				children[t.ParentID] = append(children[t.ParentID], t)
+			} else {
+				topLevel = append(topLevel, t)
+			}
+		}
+		b.WriteString("## " + list.Name + "\n\n")
+		for _, t := range topLevel {
+			writeTask(&b, t, "")
+			for _, child := range children[t.ID] {
+				writeTask(&b, child, "  ")
+			}
 		}
 		b.WriteString("\n")
 	}
@@ -486,7 +502,7 @@ func (e *Engine) ExportMarkdown() (string, error) {
 	if len(doneTasks) > 0 {
 		b.WriteString("## 已完成\n\n")
 		for _, t := range doneTasks {
-			writeTask(&b, t)
+			writeTask(&b, t, "")
 		}
 		b.WriteString("\n")
 	}

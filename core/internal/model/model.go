@@ -77,6 +77,7 @@ type Task struct {
 	Notes       string           `json:"notes"`
 	Status      Status           `json:"status"`
 	ListID      string           `json:"listId,omitempty"`
+	ParentID    string           `json:"parentId,omitempty"`
 	Flagged     bool             `json:"flagged,omitempty"`
 	Priority    int              `json:"priority,omitempty"` // 0=none, 1=low, 2=medium, 3=high
 	URL         string           `json:"url,omitempty"`
@@ -243,6 +244,7 @@ func MergeTask(a, b Task) Task {
 	pick("notes", a.Notes, b.Notes, func() { res.Notes = a.Notes }, func() { res.Notes = b.Notes })
 	pick("status", a.Status, b.Status, func() { res.Status = a.Status }, func() { res.Status = b.Status })
 	pick("listId", a.ListID, b.ListID, func() { res.ListID = a.ListID }, func() { res.ListID = b.ListID })
+	pick("parentId", a.ParentID, b.ParentID, func() { res.ParentID = a.ParentID }, func() { res.ParentID = b.ParentID })
 	pick("flagged", a.Flagged, b.Flagged, func() { res.Flagged = a.Flagged }, func() { res.Flagged = b.Flagged })
 	pick("priority", a.Priority, b.Priority, func() { res.Priority = a.Priority }, func() { res.Priority = b.Priority })
 	pick("url", a.URL, b.URL, func() { res.URL = a.URL }, func() { res.URL = b.URL })

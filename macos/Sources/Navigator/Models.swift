@@ -174,6 +174,7 @@ struct TaskItem: Codable, Identifiable, Equatable, Hashable {
     var notes: String
     var status: TaskStatus
     var listId: String?
+    var parentId: String?
     var flagged: Bool?
     var priority: Int?
     var url: String?
@@ -196,6 +197,11 @@ struct TaskItem: Codable, Identifiable, Equatable, Hashable {
         if let listId, !listId.isEmpty { return listId }
         return TaskListItem.defaultID
     }
+    var effectiveParentID: String? {
+        guard let parentId, !parentId.isEmpty else { return nil }
+        return parentId
+    }
+    var isSubtask: Bool { effectiveParentID != nil }
     var taskPriority: TaskPriority { TaskPriority(rawValue: priority ?? 0) ?? .none }
     var cleanURL: String { (url ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
     var activeRepeat: RepeatRule { repeatRule ?? .none }

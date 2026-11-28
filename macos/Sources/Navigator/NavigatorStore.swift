@@ -58,6 +58,25 @@ enum NotificationPermissionState: String {
     }
 }
 
+enum TaskFocusField: Equatable {
+    case title
+    case notes
+}
+
+struct TaskFocusRequest: Equatable {
+    let id = UUID()
+    let taskID: String
+    let field: TaskFocusField
+}
+
+struct TaskDisplayRow: Identifiable, Equatable {
+    let task: TaskItem
+    let isSubtask: Bool
+    let childCount: Int
+
+    var id: String { task.id }
+}
+
 @Observable
 @MainActor
 final class NavigatorStore {
@@ -77,8 +96,11 @@ final class NavigatorStore {
     }
 
     var section: NavSection = .all
+    var selectedTaskID: String?
     var editingTaskID: String?
+    var focusRequest: TaskFocusRequest?
     var inspectorTaskID: String?
+    var collapsedParentIDs: Set<String> = []
     var showCompletedInSection: Bool = false
     var searchQuery: String = ""
     var focusSearchTrigger: Int = 0
@@ -146,7 +168,8 @@ final class NavigatorStore {
             onComplete: { [weak self] id in self?.toggleComplete(id: id) },
             onSnooze: { [weak self] id in self?.snoozeTask(id: id, hours: 1) },
             onOpen: { [weak self] id in
-                self?.editingTaskID = id
+                self?.selectedTaskID = id
+                self?.editingTaskID = nil
                 self?.inspectorTaskID = id
                 NSApp.activate(ignoringOtherApps: true)
             }
@@ -293,18 +316,313 @@ final class NavigatorStore {
         }
     }
 
+    // MARK: - Selection, Focus & Subtask Hierarchy
+
+    func selectTask(_ id: String?) {
+        if let prev = editingTaskID {
+            commitInlineEditIfEmpty(id: prev)
+            editingTaskID = nil
+            focusRequest = nil
+        }
+        selectedTaskID = id
+        NSApp.keyWindow?.makeFirstResponder(nil)
+    }
+
+    func beginEditing(_ id: String, field: TaskFocusField) {
+        if let prev = editingTaskID, prev != id {
+            commitInlineEditIfEmpty(id: prev)
+        }
+        selectedTaskID = id
+        editingTaskID = id
+        focusRequest = TaskFocusRequest(taskID: id, field: field)
+    }
+
+    func endEditing(keepSelection: Bool = true) {
+        if let prev = editingTaskID {
+            commitInlineEditIfEmpty(id: prev)
+        }
+        editingTaskID = nil
+        focusRequest = nil
+        if !keepSelection {
+            selectedTaskID = nil
+        }
+        NSApp.keyWindow?.makeFirstResponder(nil)
+    }
+
+    func toggleCollapse(parentID: String) {
+        if collapsedParentIDs.contains(parentID) {
+            collapsedParentIDs.remove(parentID)
+        } else {
+            collapsedParentIDs.insert(parentID)
+        }
+    }
+
+    func isCollapsed(parentID: String) -> Bool {
+        collapsedParentIDs.contains(parentID)
+    }
+
+    func activeSubtasks(of parentID: String) -> [TaskItem] {
+        liveTasks.filter { !$0.isDone && $0.effectiveParentID == parentID }
+    }
+
+    func subtaskProgress(of parentID: String) -> (done: Int, total: Int) {
+        let kids = liveTasks.filter { $0.effectiveParentID == parentID }
+        guard !kids.isEmpty else { return (0, 0) }
+        return (kids.filter(\.isDone).count, kids.count)
+    }
+
+    func orderedHierarchy(from source: [TaskItem], includeCompletedChildren: Bool = false) -> [TaskDisplayRow] {
+        let idSet = Set(source.map(\.id))
+        let byID = Dictionary(uniqueKeysWithValues: source.map { ($0.id, $0) })
+        var childrenByParent: [String: [TaskItem]] = [:]
+        var childIDSet = Set<String>()
+
+        for task in source {
+            if let pid = task.effectiveParentID,
+               pid != task.id,
+               idSet.contains(pid),
+               byID[pid]?.effectiveParentID == nil {
+                childrenByParent[pid, default: []].append(task)
+                childIDSet.insert(task.id)
+            }
+        }
+
+        var completedChildrenByParent: [String: [TaskItem]] = [:]
+        if includeCompletedChildren {
+            for task in liveTasks where task.isDone {
+                if let pid = task.effectiveParentID,
+                   !idSet.contains(task.id),
+                   let parent = byID[pid],
+                   !parent.isDone,
+                   parent.effectiveParentID == nil {
+                    completedChildrenByParent[pid, default: []].append(task)
+                }
+            }
+            for (pid, kids) in completedChildrenByParent {
+                completedChildrenByParent[pid] = kids.sorted { a, b in
+                    if a.rank != b.rank { return a.rank < b.rank }
+                    return a.createdAt < b.createdAt
+                }
+            }
+        }
+
+        var rows: [TaskDisplayRow] = []
+        rows.reserveCapacity(source.count)
+        for task in source where !childIDSet.contains(task.id) {
+            let activeKids = childrenByParent[task.id] ?? []
+            let doneKids = completedChildrenByParent[task.id] ?? []
+            let totalKids = activeKids.count + doneKids.count
+            rows.append(TaskDisplayRow(task: task, isSubtask: false, childCount: totalKids))
+            if totalKids > 0 && !collapsedParentIDs.contains(task.id) {
+                for child in activeKids {
+                    rows.append(TaskDisplayRow(task: child, isSubtask: true, childCount: 0))
+                }
+                for child in doneKids {
+                    rows.append(TaskDisplayRow(task: child, isSubtask: true, childCount: 0))
+                }
+            }
+        }
+        return rows
+    }
+
+    var visibleActiveParentIDsInCurrentSection: Set<String> {
+        let activeSource: [TaskItem]
+        switch section {
+        case .all:
+            activeSource = allActiveTasks
+        case .today:
+            activeSource = todayTasks
+        case .scheduled:
+            activeSource = scheduledTasks
+        case .flagged:
+            activeSource = flaggedTasks
+        case .completed:
+            return []
+        case .list(let listID):
+            activeSource = activeTasks(in: listID)
+        case .allTags:
+            activeSource = allTaggedActiveTasks()
+        case .tag(let tagID):
+            activeSource = activeTasks(forTag: tagID)
+        }
+        return Set(activeSource.filter { !$0.isDone && $0.effectiveParentID == nil }.map(\.id))
+    }
+
+    var completedTasksNotUnderActiveParentsForCurrentSection: [TaskItem] {
+        let activeParents = visibleActiveParentIDsInCurrentSection
+        return completedTasksForCurrentSection.filter { task in
+            guard let pid = task.effectiveParentID else { return true }
+            return !activeParents.contains(pid)
+        }
+    }
+
+    var activeActionTaskID: String? {
+        selectedTaskID ?? editingTaskID
+    }
+
+    func canIndentTask(id: String) -> Bool {
+        guard let task = liveTasks.first(where: { $0.id == id }),
+              !task.isDone,
+              task.effectiveParentID == nil,
+              activeSubtasks(of: id).isEmpty else {
+            return false
+        }
+        let topLevel = activeTasks(in: task.effectiveListID).filter { $0.effectiveParentID == nil }
+        guard let idx = topLevel.firstIndex(where: { $0.id == id }) else { return false }
+        return idx > 0
+    }
+
+    func indentTask(id: String) {
+        guard canIndentTask(id: id),
+              let task = liveTasks.first(where: { $0.id == id }) else { return }
+        let listTasks = activeTasks(in: task.effectiveListID)
+        let topLevel = listTasks.filter { $0.effectiveParentID == nil }
+        guard let idx = topLevel.firstIndex(where: { $0.id == id }), idx > 0 else { return }
+        let newParent = topLevel[idx - 1]
+        let existingKids = listTasks.filter { $0.effectiveParentID == newParent.id }
+        let nextRank = (existingKids.map(\.rank).max() ?? newParent.rank) + 100
+
+        collapsedParentIDs.remove(newParent.id)
+        patchTask(id: id, rescheduleNotifications: false) { t, now in
+            t.parentId = newParent.id
+            t.rank = nextRank
+            t.stamps?["parentId"] = now
+            t.stamps?["rank"] = now
+        }
+        reload()
+        selectedTaskID = id
+    }
+
+    func canOutdentTask(id: String) -> Bool {
+        guard let task = liveTasks.first(where: { $0.id == id }),
+              !task.isDone else { return false }
+        return task.effectiveParentID != nil
+    }
+
+    func outdentTask(id: String) {
+        guard let task = liveTasks.first(where: { $0.id == id }),
+              !task.isDone,
+              let oldParentID = task.effectiveParentID else { return }
+        let listTasks = activeTasks(in: task.effectiveListID)
+        let topLevel = listTasks.filter { $0.effectiveParentID == nil }
+        let newRank: Double
+        if let pIdx = topLevel.firstIndex(where: { $0.id == oldParentID }) {
+            let parentRank = topLevel[pIdx].rank
+            if pIdx + 1 < topLevel.count {
+                let nextRank = topLevel[pIdx + 1].rank
+                newRank = nextRank > parentRank ? (parentRank + nextRank) / 2.0 : parentRank + 500
+            } else {
+                newRank = (liveTasks.map(\.rank).max() ?? parentRank) + 1000
+            }
+        } else {
+            newRank = (liveTasks.map(\.rank).max() ?? 0) + 1000
+        }
+
+        patchTask(id: id, rescheduleNotifications: false) { t, now in
+            t.parentId = nil
+            t.rank = newRank
+            t.stamps?["parentId"] = now
+            t.stamps?["rank"] = now
+        }
+        reload()
+        selectedTaskID = id
+    }
+
+    var canIndentSelectedTask: Bool {
+        guard let id = activeActionTaskID else { return false }
+        return canIndentTask(id: id)
+    }
+
+    var canOutdentSelectedTask: Bool {
+        guard let id = activeActionTaskID else { return false }
+        return canOutdentTask(id: id)
+    }
+
+    func indentSelectedTask() {
+        guard let id = activeActionTaskID else { return }
+        indentTask(id: id)
+    }
+
+    func outdentSelectedTask() {
+        guard let id = activeActionTaskID else { return }
+        outdentTask(id: id)
+    }
+
+    var visibleOrderedTaskIDs: [String] {
+        if isSearching {
+            return orderedHierarchy(from: globalSearchResults).map(\.id)
+        }
+        let showDone = showCompletedInSection
+        var ids: [String] = []
+        switch section {
+        case .all:
+            for list in liveLists {
+                ids.append(contentsOf: orderedHierarchy(from: activeTasks(in: list.id), includeCompletedChildren: showDone).map(\.id))
+            }
+        case .today:
+            ids = orderedHierarchy(from: todayTasks, includeCompletedChildren: showDone).map(\.id)
+        case .scheduled:
+            let items = scheduledTasks
+            let grouped = Dictionary(grouping: items) { DateHelper.upcomingGroupTitle(for: $0.dueAt) }
+            let orderedKeys = items.reduce(into: [String]()) { acc, item in
+                let k = DateHelper.upcomingGroupTitle(for: item.dueAt)
+                if !acc.contains(k) { acc.append(k) }
+            }
+            for day in orderedKeys {
+                ids.append(contentsOf: orderedHierarchy(from: grouped[day] ?? [], includeCompletedChildren: showDone).map(\.id))
+            }
+        case .flagged:
+            ids = orderedHierarchy(from: flaggedTasks, includeCompletedChildren: showDone).map(\.id)
+        case .completed:
+            let items = completedTasks
+            let grouped = Dictionary(grouping: items) { DateHelper.logbookGroupTitle(for: $0.completedAt) }
+            let orderedKeys = items.reduce(into: [String]()) { acc, item in
+                let k = DateHelper.logbookGroupTitle(for: item.completedAt)
+                if !acc.contains(k) { acc.append(k) }
+            }
+            for day in orderedKeys {
+                ids.append(contentsOf: orderedHierarchy(from: grouped[day] ?? []).map(\.id))
+            }
+        case .list(let listID):
+            ids = orderedHierarchy(from: activeTasks(in: listID), includeCompletedChildren: showDone).map(\.id)
+        case .allTags:
+            ids = orderedHierarchy(from: allTaggedActiveTasks(), includeCompletedChildren: showDone).map(\.id)
+        case .tag(let tagID):
+            ids = orderedHierarchy(from: activeTasks(forTag: tagID), includeCompletedChildren: showDone).map(\.id)
+        }
+        if section != .completed && showDone {
+            ids.append(contentsOf: orderedHierarchy(from: completedTasksNotUnderActiveParentsForCurrentSection).map(\.id))
+        }
+        return ids
+    }
+
+    func moveSelection(by delta: Int) {
+        let ids = visibleOrderedTaskIDs
+        guard !ids.isEmpty else { return }
+        guard let current = selectedTaskID, let idx = ids.firstIndex(of: current) else {
+            selectTask(delta > 0 ? ids.first : ids.last)
+            return
+        }
+        let next = min(max(idx + delta, 0), ids.count - 1)
+        selectTask(ids[next])
+    }
+
     // MARK: - Task Mutations
 
     @discardableResult
     func createInlineTask(
         in listID: String? = nil,
+        parentID: String? = nil,
         title: String = "",
         dueAt: String? = nil,
         flagged: Bool = false,
         tagIds: [String] = []
     ) -> TaskItem {
         let targetListID: String
-        if let listID, !listID.isEmpty {
+        if let parentID, let parent = liveTasks.first(where: { $0.id == parentID }) {
+            targetListID = parent.effectiveListID
+            collapsedParentIDs.remove(parentID)
+        } else if let listID, !listID.isEmpty {
             targetListID = listID
         } else if case .list(let cur) = section {
             targetListID = cur
@@ -320,13 +638,21 @@ final class NavigatorStore {
         }
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let maxRank = liveTasks.map(\.rank).max() ?? 0
+        let nextRank: Double
+        if let parentID {
+            let kids = activeSubtasks(of: parentID)
+            let parentRank = liveTasks.first(where: { $0.id == parentID })?.rank ?? 0
+            nextRank = (kids.map(\.rank).max() ?? parentRank) + 100
+        } else {
+            nextRank = (liveTasks.map(\.rank).max() ?? 0) + 1000
+        }
         let item = TaskItem(
             id: "t_\(UUID().uuidString.prefix(12).lowercased())",
             title: title,
             notes: "",
             status: .todo,
             listId: targetListID,
+            parentId: parentID,
             flagged: effectiveFlagged,
             priority: 0,
             url: nil,
@@ -335,21 +661,23 @@ final class NavigatorStore {
             dueAt: effectiveDue,
             repeatRule: RepeatRule.none,
             attachments: [],
-            rank: maxRank + 1000,
+            rank: nextRank,
             completedAt: nil,
             createdAt: now,
             updatedAt: now,
             deleted: false,
             stamps: [
                 "title": now, "notes": now, "status": now,
-                "listId": now, "flagged": now, "priority": now,
+                "listId": now, "parentId": now, "flagged": now, "priority": now,
                 "url": now, "subtasks": now, "tagIds": now,
                 "dueAt": now, "repeatRule": now, "rank": now, "deleted": now
             ]
         )
         let saved = bridge.saveTask(item)
         reload()
+        selectedTaskID = saved.id
         editingTaskID = saved.id
+        focusRequest = TaskFocusRequest(taskID: saved.id, field: .title)
         return saved
     }
 
@@ -358,8 +686,10 @@ final class NavigatorStore {
         if task.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && task.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && task.subtasks.isEmpty
-            && task.attachmentList.isEmpty {
+            && task.attachmentList.isEmpty
+            && activeSubtasks(of: id).isEmpty {
             bridge.deleteTask(id: id, deleted: true)
+            if selectedTaskID == id { selectedTaskID = nil }
             if editingTaskID == id { editingTaskID = nil }
             if inspectorTaskID == id { inspectorTaskID = nil }
             reload()
@@ -419,9 +749,21 @@ final class NavigatorStore {
     }
 
     func moveTaskToList(id: String, listID: String) {
+        guard let task = liveTasks.first(where: { $0.id == id }) else { return }
+        let children = liveTasks.filter { $0.effectiveParentID == id }
         patchTask(id: id, rescheduleNotifications: false) { t, now in
             t.listId = listID
             t.stamps?["listId"] = now
+            if t.effectiveParentID != nil && task.effectiveListID != listID {
+                t.parentId = nil
+                t.stamps?["parentId"] = now
+            }
+        }
+        for child in children {
+            patchTask(id: child.id, rescheduleNotifications: false) { c, now in
+                c.listId = listID
+                c.stamps?["listId"] = now
+            }
         }
     }
 
@@ -432,6 +774,7 @@ final class NavigatorStore {
         let saved = bridge.completeTask(id: id, done: nextDone)
         let spawned = nextDone ? saved.first(where: { $0.id != id }) : nil
         if nextDone && editingTaskID == id { editingTaskID = nil }
+        if nextDone && selectedTaskID == id { selectedTaskID = nil }
         reload()
         if nextDone {
             showUndo(message: "已完成「\(task.title.isEmpty ? "未命名提醒" : task.title)」") { [weak self] in
@@ -467,13 +810,21 @@ final class NavigatorStore {
 
     func deleteTask(id: String) {
         guard let task = liveTasks.first(where: { $0.id == id }) else { return }
-        if editingTaskID == id { editingTaskID = nil }
-        if inspectorTaskID == id { inspectorTaskID = nil }
-        bridge.deleteTask(id: id, deleted: true)
+        let childIDs = liveTasks.filter { $0.effectiveParentID == id }.map(\.id)
+        let allDeletedIDs = [id] + childIDs
+        if let sel = selectedTaskID, allDeletedIDs.contains(sel) { selectedTaskID = nil }
+        if let ed = editingTaskID, allDeletedIDs.contains(ed) { editingTaskID = nil }
+        if let ins = inspectorTaskID, allDeletedIDs.contains(ins) { inspectorTaskID = nil }
+        for targetID in allDeletedIDs {
+            bridge.deleteTask(id: targetID, deleted: true)
+        }
         reload()
-        showUndo(message: "已删除「\(task.title.isEmpty ? "未命名提醒" : task.title)」") { [weak self] in
+        let suffix = childIDs.isEmpty ? "" : "及 \(childIDs.count) 项子任务"
+        showUndo(message: "已删除「\(task.title.isEmpty ? "未命名提醒" : task.title)」\(suffix)") { [weak self] in
             guard let self else { return }
-            self.bridge.deleteTask(id: id, deleted: false)
+            for targetID in allDeletedIDs {
+                self.bridge.deleteTask(id: targetID, deleted: false)
+            }
             self.reload()
         }
     }

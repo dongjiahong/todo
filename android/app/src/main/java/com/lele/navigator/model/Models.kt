@@ -39,6 +39,7 @@ data class TaskItem(
     val notes: String = "",
     val status: String = "todo", // "todo" | "done"
     val listId: String = DEFAULT_LIST_ID,
+    val parentId: String? = null,
     val flagged: Boolean = false,
     val priority: Int = 0, // 0=none, 1=low, 2=medium, 3=high
     val url: String = "",

@@ -45,8 +45,22 @@ struct NavigatorApp: App {
 
                 Divider()
 
+                Button("缩进提醒事项") {
+                    store.indentSelectedTask()
+                }
+                .keyboardShortcut("]", modifiers: .command)
+                .disabled(!store.canIndentSelectedTask)
+
+                Button("减少缩进") {
+                    store.outdentSelectedTask()
+                }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(!store.canOutdentSelectedTask)
+
+                Divider()
+
                 Button("粘贴图片到当前提醒") {
-                    guard let id = store.editingTaskID ?? store.inspectorTaskID else { return }
+                    guard let id = store.activeActionTaskID ?? store.inspectorTaskID else { return }
                     let pb = NSPasteboard.general
                     if let png = pb.data(forType: .png) {
                         store.attachImage(to: id, data: png, ext: "png")
@@ -69,6 +83,7 @@ struct NavigatorApp: App {
 
 struct ContentView: View {
     @Bindable var store: NavigatorStore
+    @State private var keyMonitor: Any?
 
     var body: some View {
         NavigationSplitView {
@@ -129,6 +144,68 @@ struct ContentView: View {
                     store.previewImagePath = nil
                 }
             }
+        }
+        .onAppear {
+            installKeyMonitor()
+        }
+        .onChange(of: store.section) { _, _ in
+            store.endEditing(keepSelection: false)
+        }
+        .onDisappear {
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyMonitor = nil
+            }
+        }
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Only intercept navigation keys when no modal sheet is open and no text field is actively editing.
+            guard !store.showSettings,
+                  !store.showCommandPalette,
+                  !store.showAddListSheet,
+                  !store.showTagManager,
+                  store.editingList == nil,
+                  store.previewImagePath == nil,
+                  store.editingTaskID == nil else {
+                return event
+            }
+            if let responder = NSApp.keyWindow?.firstResponder, responder is NSTextView {
+                return event
+            }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let forbiddenModifiers: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
+            if !flags.intersection(forbiddenModifiers).isEmpty {
+                return event
+            }
+            switch event.keyCode {
+            case 126: // Up arrow
+                store.moveSelection(by: -1)
+                return nil
+            case 125: // Down arrow
+                store.moveSelection(by: 1)
+                return nil
+            case 36: // Return -> focus title of selected task
+                if let id = store.selectedTaskID {
+                    store.beginEditing(id, field: .title)
+                    return nil
+                }
+            case 53: // Escape -> clear selection
+                if store.selectedTaskID != nil {
+                    store.selectTask(nil)
+                    return nil
+                }
+            case 51: // Delete / Backspace -> delete selected task (with Undo)
+                if let id = store.selectedTaskID {
+                    store.deleteTask(id: id)
+                    return nil
+                }
+            default:
+                break
+            }
+            return event
         }
     }
 
@@ -218,55 +295,74 @@ struct ContentView: View {
             }
 
             // Main Scrollable Reminder Stream
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if store.isSearching {
-                        searchResultsStream
-                    } else {
-                        switch store.section {
-                        case .all:
-                            allGroupedStream
-                        case .today:
-                            flatStream(tasks: store.todayTasks, listID: nil, accent: NavTheme.accentBlue, showListBadge: true)
-                        case .scheduled:
-                            scheduledStream
-                        case .flagged:
-                            flatStream(tasks: store.flaggedTasks, listID: nil, accent: NavTheme.flaggedOrange, showListBadge: true)
-                        case .completed:
-                            completedStream
-                        case .list(let listID):
-                            let list = store.list(for: listID)
-                            flatStream(tasks: store.activeTasks(in: listID), listID: listID, accent: list.swiftUIColor, showListBadge: false)
-                        case .allTags:
-                            flatStream(tasks: store.allTaggedActiveTasks(), listID: nil, accent: NavTheme.accentBlue, showListBadge: true)
-                        case .tag(let tagID):
-                            let tagColor = store.liveTags.first(where: { $0.id == tagID })?.hue.color ?? NavTheme.accentBlue
-                            flatStream(tasks: store.activeTasks(forTag: tagID), listID: nil, accent: tagColor, showListBadge: true)
-                        }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if store.isSearching {
+                            searchResultsStream
+                        } else {
+                            switch store.section {
+                            case .all:
+                                allGroupedStream
+                            case .today:
+                                flatStream(tasks: store.todayTasks, listID: nil, accent: NavTheme.accentBlue, showListBadge: true)
+                            case .scheduled:
+                                scheduledStream
+                            case .flagged:
+                                flatStream(tasks: store.flaggedTasks, listID: nil, accent: NavTheme.flaggedOrange, showListBadge: true)
+                            case .completed:
+                                completedStream
+                            case .list(let listID):
+                                let list = store.list(for: listID)
+                                flatStream(tasks: store.activeTasks(in: listID), listID: listID, accent: list.swiftUIColor, showListBadge: false)
+                            case .allTags:
+                                flatStream(tasks: store.allTaggedActiveTasks(), listID: nil, accent: NavTheme.accentBlue, showListBadge: true)
+                            case .tag(let tagID):
+                                let tagColor = store.liveTags.first(where: { $0.id == tagID })?.hue.color ?? NavTheme.accentBlue
+                                flatStream(tasks: store.activeTasks(forTag: tagID), listID: nil, accent: tagColor, showListBadge: true)
+                            }
 
-                        if store.section != .completed && store.showCompletedInSection {
-                            let doneItems = store.completedTasksForCurrentSection
-                            if !doneItems.isEmpty {
-                                Text("已完成")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.top, 16)
-                                    .padding(.bottom, 4)
-                                ForEach(doneItems) { task in
-                                    TaskRowView(
-                                        task: task,
-                                        store: store,
-                                        accentTint: store.list(for: task.effectiveListID).swiftUIColor,
-                                        showListBadge: store.section != .list(task.effectiveListID)
-                                    )
+                            if store.section != .completed && store.showCompletedInSection {
+                                let doneRows = store.orderedHierarchy(from: store.completedTasksNotUnderActiveParentsForCurrentSection)
+                                if !doneRows.isEmpty {
+                                    Text("已完成")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 4)
+                                        .padding(.top, 16)
+                                        .padding(.bottom, 4)
+                                    ForEach(doneRows) { row in
+                                        TaskRowView(
+                                            task: row.task,
+                                            store: store,
+                                            accentTint: store.list(for: row.task.effectiveListID).swiftUIColor,
+                                            showListBadge: store.section != .list(row.task.effectiveListID),
+                                            isSubtask: row.isSubtask,
+                                            childCount: row.childCount
+                                        )
+                                        .id(row.id)
+                                    }
                                 }
                             }
                         }
+                        Color.clear
+                            .frame(height: 60)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                store.selectTask(nil)
+                            }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .padding(.bottom, 16)
+                }
+                .onChange(of: store.selectedTaskID) { _, newID in
+                    if let newID {
+                        withAnimation(.easeInOut(duration: 0.12)) {
+                            proxy.scrollTo(newID)
+                        }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 4)
-                .padding(.bottom, 32)
             }
         }
     }
@@ -276,16 +372,25 @@ struct ContentView: View {
     @ViewBuilder
     private var allGroupedStream: some View {
         ForEach(store.liveLists) { list in
-            let listTasks = store.activeTasks(in: list.id)
+            let rows = store.orderedHierarchy(from: store.activeTasks(in: list.id), includeCompletedChildren: store.showCompletedInSection)
             VStack(alignment: .leading, spacing: 0) {
                 Text(list.name)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(list.swiftUIColor)
+                    .padding(.horizontal, 4)
                     .padding(.top, 10)
                     .padding(.bottom, 2)
 
-                ForEach(listTasks) { task in
-                    TaskRowView(task: task, store: store, accentTint: list.swiftUIColor, showListBadge: false)
+                ForEach(rows) { row in
+                    TaskRowView(
+                        task: row.task,
+                        store: store,
+                        accentTint: list.swiftUIColor,
+                        showListBadge: false,
+                        isSubtask: row.isSubtask,
+                        childCount: row.childCount
+                    )
+                    .id(row.id)
                 }
 
                 PhantomTaskRow {
@@ -315,16 +420,20 @@ struct ContentView: View {
                 Text(day)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(day == "已逾期" ? NavTheme.danger : .primary)
+                    .padding(.horizontal, 4)
                     .padding(.top, 14)
                     .padding(.bottom, 4)
 
-                ForEach(grouped[day] ?? []) { task in
+                ForEach(store.orderedHierarchy(from: grouped[day] ?? [], includeCompletedChildren: store.showCompletedInSection)) { row in
                     TaskRowView(
-                        task: task,
+                        task: row.task,
                         store: store,
-                        accentTint: store.list(for: task.effectiveListID).swiftUIColor,
-                        showListBadge: true
+                        accentTint: store.list(for: row.task.effectiveListID).swiftUIColor,
+                        showListBadge: true,
+                        isSubtask: row.isSubtask,
+                        childCount: row.childCount
                     )
+                    .id(row.id)
                 }
             }
             PhantomTaskRow {
@@ -352,16 +461,20 @@ struct ContentView: View {
                 Text(day)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
                     .padding(.top, 14)
                     .padding(.bottom, 4)
 
-                ForEach(grouped[day] ?? []) { task in
+                ForEach(store.orderedHierarchy(from: grouped[day] ?? [])) { row in
                     TaskRowView(
-                        task: task,
+                        task: row.task,
                         store: store,
-                        accentTint: store.list(for: task.effectiveListID).swiftUIColor,
-                        showListBadge: true
+                        accentTint: store.list(for: row.task.effectiveListID).swiftUIColor,
+                        showListBadge: true,
+                        isSubtask: row.isSubtask,
+                        childCount: row.childCount
                     )
+                    .id(row.id)
                 }
             }
         }
@@ -369,13 +482,16 @@ struct ContentView: View {
 
     @ViewBuilder
     private func flatStream(tasks: [TaskItem], listID: String?, accent: Color, showListBadge: Bool) -> some View {
-        ForEach(tasks) { task in
+        ForEach(store.orderedHierarchy(from: tasks, includeCompletedChildren: store.showCompletedInSection)) { row in
             TaskRowView(
-                task: task,
+                task: row.task,
                 store: store,
-                accentTint: listID == nil ? store.list(for: task.effectiveListID).swiftUIColor : accent,
-                showListBadge: showListBadge
+                accentTint: listID == nil ? store.list(for: row.task.effectiveListID).swiftUIColor : accent,
+                showListBadge: showListBadge,
+                isSubtask: row.isSubtask,
+                childCount: row.childCount
             )
+            .id(row.id)
         }
         PhantomTaskRow {
             _ = store.createInlineTask(in: listID)
@@ -392,12 +508,14 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.top, 60)
         } else {
-            ForEach(results) { task in
+            ForEach(store.orderedHierarchy(from: results)) { row in
                 TaskRowView(
-                    task: task,
+                    task: row.task,
                     store: store,
-                    accentTint: store.list(for: task.effectiveListID).swiftUIColor,
-                    showListBadge: true
+                    accentTint: store.list(for: row.task.effectiveListID).swiftUIColor,
+                    showListBadge: true,
+                    isSubtask: row.isSubtask,
+                    childCount: row.childCount
                 )
             }
         }
@@ -499,7 +617,7 @@ struct CommandPaletteView: View {
                 group: "提醒事项"
             ) {
                 store.section = .list(task.effectiveListID)
-                store.editingTaskID = task.id
+                store.selectTask(task.id)
                 store.showCommandPalette = false
             })
         }

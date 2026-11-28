@@ -7,6 +7,8 @@ struct TaskRowView: View {
     @Bindable var store: NavigatorStore
     var accentTint: Color = NavTheme.accentBlue
     var showListBadge: Bool = false
+    var isSubtask: Bool = false
+    var childCount: Int = 0
 
     @State private var hovered = false
     @State private var showDuePopover = false
@@ -14,7 +16,11 @@ struct TaskRowView: View {
     @State private var showImagePopover = false
     @State private var draftTitle: String = ""
     @State private var draftNotes: String = ""
-    @FocusState private var titleFocused: Bool
+    @FocusState private var focusedField: TaskFocusField?
+
+    private var isSelected: Bool {
+        store.selectedTaskID == task.id
+    }
 
     private var isEditing: Bool {
         store.editingTaskID == task.id
@@ -22,6 +28,10 @@ struct TaskRowView: View {
 
     private var isInspectorOpen: Bool {
         store.inspectorTaskID == task.id
+    }
+
+    private var isCollapsed: Bool {
+        store.isCollapsed(parentID: task.id)
     }
 
     private var taskTags: [TagItem] {
@@ -48,22 +58,22 @@ struct TaskRowView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                // Right-side indicators: Flag + (i) Inspector button
-                HStack(spacing: 5) {
+                // Right-side indicators: Flag + (i) Inspector button + Subtask Chevron
+                HStack(spacing: 6) {
                     if task.isFlagged && !isEditing {
                         Image(systemName: "flag.fill")
                             .font(.system(size: 11))
                             .foregroundStyle(NavTheme.flaggedOrange)
                     }
 
-                    if isEditing || hovered || isInspectorOpen {
+                    if isSelected || isEditing || hovered || isInspectorOpen {
                         Button {
-                            store.editingTaskID = task.id
+                            store.selectedTaskID = task.id
                             store.inspectorTaskID = isInspectorOpen ? nil : task.id
                         } label: {
                             Image(systemName: "info.circle")
                                 .font(.system(size: 13.5))
-                                .foregroundStyle(isEditing || isInspectorOpen ? NavTheme.flaggedOrange : .secondary)
+                                .foregroundStyle(isSelected || isEditing || isInspectorOpen ? accentTint : .secondary)
                         }
                         .buttonStyle(.plain)
                         .help("检查器详情")
@@ -77,44 +87,65 @@ struct TaskRowView: View {
                             TaskInspectorPopover(taskID: task.id, store: store)
                         }
                     }
+
+                    if childCount > 0 {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                store.toggleCollapse(parentID: task.id)
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                if isCollapsed {
+                                    Text("\(childCount)")
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .monospacedDigit()
+                                }
+                                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(accentTint)
+                                    .frame(width: 14, height: 14)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(isCollapsed ? "展开 \(childCount) 项子任务" : "折叠子任务")
+                    }
                 }
                 .padding(.top, 1.5)
             }
+            .padding(.leading, isSubtask ? 28 : 0)
             .padding(.vertical, 5)
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected || isEditing ? Color.primary.opacity(0.085) : Color.clear)
+            )
             .contentShape(Rectangle())
             .onTapGesture {
-                if !isEditing {
-                    if let prev = store.editingTaskID, prev != task.id {
-                        store.commitInlineEditIfEmpty(id: prev)
-                    }
-                    draftTitle = task.title
-                    draftNotes = task.notes
-                    store.editingTaskID = task.id
-                }
+                store.selectTask(task.id)
             }
 
             Divider()
-                .padding(.leading, 26)
+                .padding(.leading, isSubtask ? 58 : 30)
         }
         .onHover { hovered = $0 }
         .onAppear {
             draftTitle = task.title
             draftNotes = task.notes
-            if isEditing && task.title.isEmpty {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    titleFocused = true
-                }
-            }
+            applyFocusIfNeeded()
         }
         .onChange(of: isEditing) { _, nowEditing in
             if nowEditing {
                 draftTitle = task.title
                 draftNotes = task.notes
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    titleFocused = true
-                }
+                applyFocusIfNeeded()
+            } else {
+                focusedField = nil
             }
+        }
+        .onChange(of: store.focusRequest) { _, _ in
+            applyFocusIfNeeded()
         }
         .onChange(of: task.title) { _, newVal in
             if !isEditing { draftTitle = newVal }
@@ -129,6 +160,22 @@ struct TaskRowView: View {
             Button(task.isFlagged ? "取消旗标" : "添加旗标") {
                 store.toggleFlag(id: task.id)
             }
+            if !isSubtask && !task.isDone {
+                Button("添加子任务") {
+                    _ = store.createInlineTask(in: task.effectiveListID, parentID: task.id)
+                }
+            }
+            if store.canIndentTask(id: task.id) {
+                Button("缩进提醒事项") {
+                    store.indentTask(id: task.id)
+                }
+            }
+            if store.canOutdentTask(id: task.id) {
+                Button("减少缩进") {
+                    store.outdentTask(id: task.id)
+                }
+            }
+            Divider()
             Button("粘贴剪贴板图片") {
                 pasteImageFromClipboard()
             }
@@ -136,7 +183,7 @@ struct TaskRowView: View {
                 pickImageFromDisk()
             }
             Button("检查器详情…") {
-                store.editingTaskID = task.id
+                store.selectedTaskID = task.id
                 store.inspectorTaskID = task.id
             }
             Menu("移动到列表") {
@@ -160,7 +207,16 @@ struct TaskRowView: View {
         }
     }
 
-    // MARK: - Read-only compact row (with inline image thumbnails directly under notes)
+    private func applyFocusIfNeeded() {
+        guard isEditing, let req = store.focusRequest, req.taskID == task.id else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            if store.editingTaskID == task.id {
+                focusedField = req.field
+            }
+        }
+    }
+
+    // MARK: - Read-only compact row (clicking row selects whole row; clicking title/notes focuses that exact field)
 
     @ViewBuilder
     private var readOnlyContent: some View {
@@ -174,6 +230,12 @@ struct TaskRowView: View {
                 .font(.system(size: 13.5))
                 .foregroundStyle(task.isDone ? .secondary : .primary)
                 .strikethrough(task.isDone, color: .secondary.opacity(0.6))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            draftTitle = task.title
+            draftNotes = task.notes
+            store.beginEditing(task.id, field: .title)
         }
 
         if !task.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -203,9 +265,10 @@ struct TaskRowView: View {
         }
 
         let badge = DateHelper.dueBadge(task.dueAt, settled: task.isDone)
+        let progress = isSubtask ? (done: 0, total: 0) : store.subtaskProgress(of: task.id)
         let hasMeta = badge != nil
             || !taskTags.isEmpty
-            || task.checklistTotalCount > 0
+            || progress.total > 0
             || showListBadge
 
         if hasMeta {
@@ -230,10 +293,10 @@ struct TaskRowView: View {
                         .foregroundStyle(tag.hue.color)
                 }
 
-                if task.checklistTotalCount > 0 {
+                if progress.total > 0 {
                     HStack(spacing: 4) {
-                        MiniProgressRing(done: task.checklistDoneCount, total: task.checklistTotalCount)
-                        Text("\(task.checklistDoneCount)/\(task.checklistTotalCount)")
+                        MiniProgressRing(done: progress.done, total: progress.total)
+                        Text("\(progress.done)/\(progress.total)")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
@@ -257,7 +320,7 @@ struct TaskRowView: View {
             TextField("新提醒事项", text: $draftTitle)
                 .font(.system(size: 13.5))
                 .textFieldStyle(.plain)
-                .focused($titleFocused)
+                .focused($focusedField, equals: .title)
                 .onChange(of: draftTitle) { _, val in
                     store.debouncedPatchTask(id: task.id) { t, now in
                         t.title = val
@@ -268,12 +331,11 @@ struct TaskRowView: View {
                     if draftTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         store.commitInlineEditIfEmpty(id: task.id)
                     } else {
-                        _ = store.createInlineTask(in: task.effectiveListID)
+                        _ = store.createInlineTask(in: task.effectiveListID, parentID: task.effectiveParentID)
                     }
                 }
                 .onExitCommand {
-                    store.commitInlineEditIfEmpty(id: task.id)
-                    store.editingTaskID = nil
+                    store.endEditing(keepSelection: true)
                 }
         }
 
@@ -283,11 +345,15 @@ struct TaskRowView: View {
             .foregroundStyle(.secondary)
             .textFieldStyle(.plain)
             .lineLimit(2...10)
+            .focused($focusedField, equals: .notes)
             .onChange(of: draftNotes) { _, val in
                 store.debouncedPatchTask(id: task.id) { t, now in
                     t.notes = val
                     t.stamps?["notes"] = now
                 }
+            }
+            .onExitCommand {
+                store.endEditing(keepSelection: true)
             }
 
         // Inline image thumbnails right under notes during editing (with delete & quick preview)
@@ -585,6 +651,12 @@ struct TaskRowView: View {
                         .font(.system(size: 12.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(4)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            draftTitle = task.title
+                            draftNotes = task.notes
+                            store.beginEditing(task.id, field: .notes)
+                        }
                 }
             }
         }
@@ -610,7 +682,7 @@ struct PhantomTaskRow: View {
                 Spacer()
             }
             .padding(.vertical, 5)
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
