@@ -3,11 +3,13 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var store: NavigatorStore
-    @State private var copiedAddress = false
     @State private var copiedCode = false
-    @State private var manualAddr = ""
-    @State private var peerCode = ""
-    @State private var statusFeedback: String?
+    @State private var pairTarget: DiscoveredPeer?
+    @State private var manualIP = ""
+    @State private var pairCode = ""
+    @State private var busyMsg: String?
+    @State private var resultMsg: String?
+    @State private var errorMsg: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,9 +46,10 @@ struct SettingsView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
         }
-        .frame(width: 520, height: 470)
+        .frame(width: 540, height: 520)
         .onAppear {
             store.refreshNotificationStatus()
+            store.refreshSyncStatus()
         }
     }
 
@@ -107,11 +110,12 @@ struct SettingsView: View {
             }
 
             Section("快捷键") {
-                shortcutRow("快速新建任务", keys: "⌘ N")
+                shortcutRow("快速新建提醒", keys: "⌘ N")
+                shortcutRow("新建列表", keys: "⌘ L")
+                shortcutRow("粘贴图片到当前提醒", keys: "⇧ ⌘ V")
                 shortcutRow("聚焦全局搜索", keys: "⌘ F")
                 shortcutRow("打开命令面板", keys: "⌘ K")
                 shortcutRow("打开设置", keys: "⌘ ,")
-                shortcutRow("导出 Markdown", keys: "⇧ ⌘ E")
             }
 
             Section("关于") {
@@ -131,106 +135,290 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - TradeFlow-Style Symmetric LAN Sync Tab
+
     private var syncTab: some View {
-        Form {
-            Section("本机配对信息（供 Android 连接）") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("6 位配对码")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                        let code = store.syncStatus.pairCode ?? "------"
-                        Text(code.count == 6 ? "\(code.prefix(3)) \(code.suffix(3))" : code)
-                            .font(.system(size: 26, weight: .bold, design: .monospaced))
-                    }
-                    Spacer()
-                    Button(copiedCode ? "已复制" : "复制") {
-                        if let code = store.syncStatus.pairCode {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(code, forType: .string)
-                            copiedCode = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedCode = false }
-                        }
-                    }
-                    .controlSize(.small)
-
-                    Button("换一个") {
-                        store.regeneratePairCode()
-                    }
-                    .controlSize(.small)
-                }
-
-                if !store.syncStatus.address.isEmpty {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                // Local Device Card + Generate Pairing Code
+                VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        LabeledContent("本机局域网地址") {
-                            Text(store.syncStatus.address)
-                                .font(.system(size: 12.5, design: .monospaced))
+                        HStack(spacing: 7) {
+                            Image(systemName: "wifi")
+                                .foregroundStyle(store.syncStatus.running ? NavTheme.logbookGreen : .secondary)
+                            Text("WiFi 局域网同步（macOS ⇄ Android）")
+                                .font(.system(size: 13.5, weight: .semibold))
+                        }
+                        Spacer()
+                        Text(store.syncStatus.running ? "UDP + HTTP 运行中" : "未启动")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(store.syncStatus.running ? NavTheme.logbookGreen : .secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                (store.syncStatus.running ? NavTheme.logbookGreen : Color.gray).opacity(0.13),
+                                in: Capsule()
+                            )
+                    }
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(store.syncStatus.deviceName.isEmpty ? "Mac 桌面端" : store.syncStatus.deviceName)
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(store.syncStatus.address.isEmpty ? "未检测到局域网 IP" : store.syncStatus.address)
+                                .font(.system(size: 11.5, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         }
-                        Button(copiedAddress ? "已复制" : "复制") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(store.syncStatus.address, forType: .string)
-                            copiedAddress = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedAddress = false }
-                        }
-                        .controlSize(.small)
-                    }
-                }
-            }
-
-            Section("已发现设备") {
-                if store.syncStatus.peers.isEmpty {
-                    HStack {
-                        Text("同一 Wi-Fi 下会自动发现其他设备")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(.secondary)
                         Spacer()
-                        Button("立即同步") {
-                            store.syncNow()
-                        }
-                        .controlSize(.small)
-                    }
-                } else {
-                    ForEach(store.syncStatus.peers) { peer in
-                        HStack {
-                            Circle()
-                                .fill(peer.ok ? Color.green : Color.orange)
-                                .frame(width: 7, height: 7)
-                            Text(peer.addr)
-                                .font(.system(size: 12.5, design: .monospaced))
-                            Spacer()
-                            Text(peer.ok ? "已同步" : (peer.pair == "wrong" ? "配对码错误" : "未连接"))
+                        Button {
+                            errorMsg = nil
+                            store.generatePairingCode()
+                        } label: {
+                            Label("生成配对码", systemImage: "key.fill")
                                 .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+
+                    if let code = store.syncStatus.activePairingCode, !code.isEmpty {
+                        HStack {
+                            Text("在另一台设备输入 6 位配对码（5 分钟有效）：")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(NavTheme.accentBlue)
+                            Spacer()
+                            Text(code.count == 6 ? "\(code.prefix(3)) \(code.suffix(3))" : code)
+                                .font(.system(size: 18, weight: .bold, design: .monospaced))
+                            Button(copiedCode ? "已复制" : "复制") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(code, forType: .string)
+                                copiedCode = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedCode = false }
+                            }
+                            .controlSize(.mini)
+                        }
+                        .padding(10)
+                        .background(NavTheme.accentBlue.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                .padding(12)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+
+                // Status / Result / Error Banner
+                if let busy = busyMsg {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(busy).font(.system(size: 12))
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                }
+                if let ok = resultMsg {
+                    HStack(spacing: 7) {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(NavTheme.logbookGreen)
+                        Text(ok).font(.system(size: 12)).foregroundStyle(NavTheme.logbookGreen)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(NavTheme.logbookGreen.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                }
+                if let err = errorMsg {
+                    HStack(spacing: 7) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(NavTheme.danger)
+                        Text(err).font(.system(size: 12)).foregroundStyle(NavTheme.danger)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(NavTheme.danger.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                // Paired Devices
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("已配对设备")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    if store.syncStatus.pairedPeers.isEmpty {
+                        Text("暂无已配对设备")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                                    .foregroundStyle(.quaternary)
+                            )
+                    } else {
+                        ForEach(store.syncStatus.pairedPeers) { peer in
+                            HStack(spacing: 10) {
+                                Circle()
+                                    .fill(peer.online ? NavTheme.logbookGreen : Color.gray.opacity(0.45))
+                                    .frame(width: 8, height: 8)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(peer.deviceName)
+                                        .font(.system(size: 12.5, weight: .medium))
+                                    Text(peerSubtitle(peer))
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    busyMsg = "正在同步 \(peer.deviceName)…"
+                                    resultMsg = nil
+                                    errorMsg = nil
+                                    store.syncWithPeer(deviceID: peer.deviceId) { err in
+                                        busyMsg = nil
+                                        if let err {
+                                            errorMsg = err
+                                        } else {
+                                            resultMsg = "已与 \(peer.deviceName) 完成同步"
+                                        }
+                                    }
+                                } label: {
+                                    Label("立即同步", systemImage: "arrow.triangle.2.circlepath")
+                                        .font(.system(size: 11.5))
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(busyMsg != nil)
+
+                                Button(role: .destructive) {
+                                    store.deletePairedPeer(deviceID: peer.deviceId)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("解除配对")
+                            }
+                            .padding(10)
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                         }
                     }
+                }
+
+                // Discovered Devices (UDP)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("局域网发现的设备 (UDP)")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    if store.syncStatus.discoveredPeers.isEmpty {
+                        Text("正在同一 Wi-Fi 下扫描其他 TODO 设备…")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                                    .foregroundStyle(.quaternary)
+                            )
+                    } else {
+                        ForEach(store.syncStatus.discoveredPeers) { peer in
+                            HStack(spacing: 10) {
+                                Circle()
+                                    .fill(NavTheme.logbookGreen)
+                                    .frame(width: 8, height: 8)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(peer.deviceName)
+                                        .font(.system(size: 12.5, weight: .medium))
+                                    Text("\(peer.ip):\(peer.httpPort)")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("配对") {
+                                    pairTarget = peer
+                                    errorMsg = nil
+                                }
+                                .controlSize(.small)
+                            }
+                            .padding(10)
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+
+                // Pair Confirm / Manual IP Input
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
+                        Text(pairTarget != nil
+                             ? "与 \(pairTarget!.deviceName) (\(pairTarget!.ip)) 配对"
+                             : "手动输入 IP 配对")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
                         Spacer()
-                        Button("立即同步") { store.syncNow() }
-                            .controlSize(.small)
+                        if pairTarget != nil {
+                            Button("切换手动输入") { pairTarget = nil }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(NavTheme.accentBlue)
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        if pairTarget == nil {
+                            TextField("对方局域网 IP（如 192.168.1.20）", text: $manualIP)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 12, design: .monospaced))
+                        }
+                        TextField("6位配对码", text: $pairCode)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(width: 100)
+                        Button("确认配对") {
+                            submitPair()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(busyMsg != nil || pairCode.filter(\.isNumber).count != 6 || (pairTarget == nil && manualIP.trimmingCharacters(in: .whitespaces).isEmpty))
                     }
                 }
             }
-
-            Section("连接另一台 Mac（可选）") {
-                HStack(spacing: 8) {
-                    TextField("对方地址 (如 192.168.1.5:8787)", text: $manualAddr)
-                    TextField("6 位码", text: $peerCode)
-                        .frame(width: 76)
-                    Button("连接") {
-                        store.connectManualPeer(address: manualAddr, code: peerCode)
-                        statusFeedback = "已触发连接，正在同步…"
-                    }
-                    .disabled(peerCode.filter(\.isNumber).count != 6)
-                }
-                if let msg = statusFeedback {
-                    Text(msg)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                }
+            .padding(12)
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                store.refreshSyncStatus()
             }
         }
-        .formStyle(.grouped)
+    }
+
+    private func submitPair() {
+        let ip = pairTarget?.ip ?? manualIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        let port = pairTarget?.httpPort ?? 8787
+        let digits = pairCode.filter(\.isNumber)
+        busyMsg = "正在与 \(ip) 配对…"
+        errorMsg = nil
+        resultMsg = nil
+        store.pairWithPeer(ip: ip, port: port, code: digits) { res in
+            busyMsg = nil
+            switch res {
+            case .success(let peer):
+                pairTarget = nil
+                pairCode = ""
+                manualIP = ""
+                resultMsg = "已成功配对 \(peer.deviceName)，正在自动同步"
+            case .failure(let err):
+                errorMsg = err.localizedDescription
+            }
+        }
+    }
+
+    private func peerSubtitle(_ peer: PairedPeer) -> String {
+        let addr = peer.lastIp.isEmpty ? "离线" : "\(peer.lastIp):\(peer.lastPort > 0 ? peer.lastPort : 8787)"
+        if peer.lastSyncAt > 0 {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm:ss"
+            let t = f.string(from: Date(timeIntervalSince1970: Double(peer.lastSyncAt) / 1000.0))
+            return "\(addr) · 上次 \(t)"
+        }
+        return addr
     }
 
     private var dataTab: some View {
@@ -239,7 +427,7 @@ struct SettingsView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("导出为 Markdown")
-                        Text("包含所有进行中、待办与日志簿任务及子任务")
+                        Text("包含所有自定义列表与已完成提醒及子任务")
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                     }

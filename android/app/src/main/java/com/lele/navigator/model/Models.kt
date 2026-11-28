@@ -86,25 +86,37 @@ data class BoardState(
 )
 
 @Serializable
-data class PeerStatus(
-    val addr: String,
-    val ok: Boolean = false,
-    val at: Long = 0L,
-    val typed: Boolean = false,
-    val pair: String = "ok",
-    val retry: Long = 0L
+data class DiscoveredPeer(
+    val deviceId: String,
+    val deviceName: String = "",
+    val ip: String = "",
+    val httpPort: Int = 8787,
+    val lastSeenMs: Long = 0L
+)
+
+@Serializable
+data class PairedPeer(
+    val deviceId: String,
+    val deviceName: String = "",
+    val lastSyncAt: Long = 0L,
+    val lastIp: String = "",
+    val lastPort: Int = 8787,
+    val online: Boolean = false
 )
 
 @Serializable
 data class SyncStatus(
-    val listening: Boolean = false,
+    val running: Boolean = false,
+    val deviceId: String = "",
+    val deviceName: String = "Android 手机",
     val address: String = "",
-    val pairCode: String? = null,
-    val peers: List<PeerStatus> = emptyList(),
-    val unreachable: Boolean = false,
+    val httpPort: Int = 8787,
+    val activePairingCode: String? = null,
+    val pairingExpiresAt: Long? = null,
+    val pairedPeers: List<PairedPeer> = emptyList(),
+    val discoveredPeers: List<DiscoveredPeer> = emptyList(),
     val syncedAt: Long = 0L,
-    val pair: String = "need",
-    val retry: Long = 0L
+    val lastError: String? = null
 )
 
 @Serializable

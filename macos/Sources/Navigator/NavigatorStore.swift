@@ -65,6 +65,7 @@ final class NavigatorStore {
     var tags: [TagItem] = []
     var lists: [TaskListItem] = []
     var syncStatus: SyncStatus = SyncStatus()
+    var isSyncing: Bool = false
     var dataDirPath: String = ""
     var notificationState: NotificationPermissionState = .unknown
 
@@ -628,9 +629,51 @@ final class NavigatorStore {
 
     // MARK: - Sync & Export
 
-    func regeneratePairCode() {
-        _ = bridge.regeneratePairCode()
+    func refreshSyncStatus() {
         syncStatus = bridge.syncStatus()
+    }
+
+    func generatePairingCode() {
+        _ = bridge.generatePairingCode()
+        syncStatus = bridge.syncStatus()
+    }
+
+    func pairWithPeer(ip: String, port: Int = 8787, code: String, completion: @escaping (Result<PairedPeer, Error>) -> Void) {
+        isSyncing = true
+        let trimmedIP = ip.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digits = code.filter(\.isNumber)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let res = CoreBridge.shared.pairWithPeer(ip: trimmedIP, port: port, code: digits)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isSyncing = false
+                self.syncStatus = self.bridge.syncStatus()
+                if let peer = res.peer {
+                    completion(.success(peer))
+                } else {
+                    completion(.failure(NSError(domain: "Sync", code: 1, userInfo: [NSLocalizedDescriptionKey: res.error ?? "配对失败"])))
+                }
+            }
+        }
+    }
+
+    func deletePairedPeer(deviceID: String) {
+        bridge.deletePairedPeer(deviceID: deviceID)
+        syncStatus = bridge.syncStatus()
+    }
+
+    func syncWithPeer(deviceID: String, completion: ((String?) -> Void)? = nil) {
+        isSyncing = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let err = CoreBridge.shared.syncWithPeer(deviceID: deviceID)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isSyncing = false
+                self.reload()
+                self.syncStatus = self.bridge.syncStatus()
+                completion?(err)
+            }
+        }
     }
 
     func syncNow() {
@@ -638,17 +681,33 @@ final class NavigatorStore {
         syncStatus = bridge.syncStatus()
     }
 
-    func connectManualPeer(address: String, code: String) {
-        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            bridge.addPeerAddress(trimmed)
+    var syncBadgeInfo: (color: Color, label: String, detail: String) {
+        if isSyncing {
+            return (NavTheme.accentBlue, "同步中…", "正在与局域网设备同步")
         }
-        let digits = code.filter(\.isNumber)
-        if digits.count == 6 {
-            bridge.setPeerCode(digits)
+        if let err = syncStatus.lastError, !err.isEmpty {
+            return (NavTheme.danger, "同步异常", err)
         }
-        bridge.syncNow()
-        syncStatus = bridge.syncStatus()
+        let onlinePaired = syncStatus.pairedPeers.filter(\.online).count
+        if !syncStatus.pairedPeers.isEmpty {
+            if syncStatus.syncedAt > 0 {
+                let f = DateFormatter()
+                f.dateFormat = "HH:mm"
+                let t = f.string(from: Date(timeIntervalSince1970: Double(syncStatus.syncedAt) / 1000.0))
+                if onlinePaired > 0 {
+                    return (NavTheme.logbookGreen, "已同步 · \(t)", "\(onlinePaired) 台设备在线")
+                }
+                return (NavTheme.logbookGreen.opacity(0.75), "已同步 · \(t)", "已配对设备当前离线")
+            }
+            if onlinePaired > 0 {
+                return (NavTheme.logbookGreen, "\(onlinePaired) 台在线", "点击立即同步")
+            }
+            return (.gray, "已配对 · 离线", "等待设备加入同一 Wi-Fi")
+        }
+        if !syncStatus.discoveredPeers.isEmpty {
+            return (NavTheme.flaggedOrange, "发现 \(syncStatus.discoveredPeers.count) 台设备", "点击前往配对")
+        }
+        return (syncStatus.running ? NavTheme.accentBlue : .gray, "未配对", "点击配置局域网同步")
     }
 
     func importJSON(_ raw: String) {

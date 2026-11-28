@@ -2,9 +2,14 @@ package syncer
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"strconv"
@@ -13,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"navigator/core/internal/auth"
 	"navigator/core/internal/model"
 	"navigator/core/internal/store"
 )
@@ -21,20 +25,32 @@ import (
 const (
 	DiscoveryPort = 8788
 	DefaultPort   = 8787
-	probeMsg      = "NAVIGATOR/2 DISCOVER"
-	offerPrefix   = "NAVIGATOR/2 OFFER "
+	pairingTTLMs  = 5 * 60 * 1000
+	peerStaleMs   = 16 * 1000
+	beaconEvery   = 3 * time.Second
 	clockMarginMs = 5 * 60 * 1000
-	exchangeWait  = 4 * time.Second
+	exchangeWait  = 5 * time.Second
 )
 
-type peerEntry struct {
-	addr        string
-	heard       int64
-	ok          bool
-	at          int64
-	refused     bool
-	lockedUntil int64
-	typed       bool
+type udpBeacon struct {
+	App        string `json:"app"`
+	V          int    `json:"v"`
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
+	HTTPPort   int    `json:"httpPort"`
+}
+
+type pairReq struct {
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
+	Code       string `json:"code"`
+	HTTPPort   int    `json:"httpPort"`
+}
+
+type pairResp struct {
+	DeviceID      string `json:"deviceId"`
+	DeviceName    string `json:"deviceName"`
+	PairingSecret string `json:"pairingSecret"`
 }
 
 type exchangeReq struct {
@@ -51,34 +67,59 @@ type exchangeResp struct {
 	At    int64            `json:"at"`
 }
 
-// Syncer runs the LAN HTTP server (on macOS/desktop) and active event-driven peer exchange loop.
+// Syncer implements TradeFlow-style symmetric P2P LAN discovery, one-time 6-digit pairing,
+// persistent HMAC-SHA256 peer secrets, and event-driven bidirectional sync on both macOS and Android.
 type Syncer struct {
-	store   *store.Store
-	pairing *auth.Pairing
+	store *store.Store
 
-	mu         sync.Mutex
-	prover     string
-	peers      []*peerEntry
-	peerAssets map[string]map[string]struct{}
-	listening  bool
-	boundPort  int
-	syncedAt   int64
-	listener   func(string)
+	mu          sync.Mutex
+	deviceID    string
+	deviceName  string
+	running     bool
+	boundPort   int
+	pairingCode string
+	pairingExp  int64
+	discovered  map[string]model.DiscoveredPeer
+	peerSecrets map[string]string
+	peerHeard   map[string]int64
+	peerAssets  map[string]map[string]struct{}
+	syncedAt    int64
+	lastError   string
+	listener    func(string)
 
-	nudgeCh chan struct{}
-	stopCh  chan struct{}
-	started atomic.Bool
-	serving atomic.Bool
+	nudgeCh     chan struct{}
+	stopCh      chan struct{}
+	started     atomic.Bool
+	syncInFlight atomic.Bool
 }
 
-func New(st *store.Store) *Syncer {
-	return &Syncer{
-		store:      st,
-		pairing:    auth.NewPairing(),
-		peerAssets: make(map[string]map[string]struct{}),
-		nudgeCh:    make(chan struct{}, 1),
-		stopCh:     make(chan struct{}),
+func New(st *store.Store, deviceID, deviceName string) *Syncer {
+	s := &Syncer{
+		store:       st,
+		deviceID:    deviceID,
+		deviceName:  deviceName,
+		discovered:  make(map[string]model.DiscoveredPeer),
+		peerSecrets: make(map[string]string),
+		peerHeard:   make(map[string]int64),
+		peerAssets:  make(map[string]map[string]struct{}),
+		nudgeCh:     make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
 	}
+	s.reloadPeerSecrets()
+	return s
+}
+
+func (s *Syncer) reloadPeerSecrets() {
+	peers, err := s.store.ListSyncPeers()
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	s.peerSecrets = make(map[string]string, len(peers))
+	for _, p := range peers {
+		s.peerSecrets[p.DeviceID] = p.PairingSecret
+	}
+	s.mu.Unlock()
 }
 
 func (s *Syncer) SetListener(fn func(string)) {
@@ -87,89 +128,10 @@ func (s *Syncer) SetListener(fn func(string)) {
 	s.mu.Unlock()
 }
 
-func (s *Syncer) SetHostCode(code string) error {
-	if !auth.IsValidCode(code) {
-		return fmt.Errorf("pairing code must be 6 digits")
-	}
-	s.pairing.SetCode(code)
-	s.emitStatus()
-	return nil
-}
-
-func (s *Syncer) NewHostCode() (string, error) {
-	code, err := auth.NewCode()
-	if err != nil {
-		return "", err
-	}
-	s.pairing.SetCode(code)
-	s.emitStatus()
-	return code, nil
-}
-
-func (s *Syncer) HostCode() string {
-	return s.pairing.Code()
-}
-
-func (s *Syncer) SetPeerCode(code string) error {
-	code = strings.TrimSpace(code)
-	if code != "" && !auth.IsValidCode(code) {
-		return fmt.Errorf("pairing code must be 6 digits")
-	}
-	s.mu.Lock()
-	s.prover = code
-	for _, p := range s.peers {
-		p.refused = false
-		p.lockedUntil = 0
-	}
-	s.mu.Unlock()
-	s.emitStatus()
-	s.Nudge()
-	return nil
-}
-
-func (s *Syncer) AddManualPeer(rawAddr string) {
-	addr := normalizeAddr(rawAddr)
-	if addr == "" {
-		return
-	}
-	s.mu.Lock()
-	found := false
-	for _, p := range s.peers {
-		if p.addr == addr {
-			p.typed = true
-			found = true
-			break
-		}
-	}
-	if !found {
-		kept := s.peers[:0]
-		for _, p := range s.peers {
-			if !p.typed {
-				kept = append(kept, p)
-			}
-		}
-		s.peers = append(kept, &peerEntry{addr: addr, typed: true})
-	}
-	s.mu.Unlock()
-	s.emitStatus()
-	s.Nudge()
-}
-
-// Nudge wakes the active sync loop immediately after any local mutation or foreground resume.
-func (s *Syncer) Nudge() {
-	select {
-	case s.nudgeCh <- struct{}{}:
-	default:
-	}
-}
-
-// StartServer starts the LAN HTTP sync server and UDP discovery responder (used on Mac).
-func (s *Syncer) StartServer(port int) (int, error) {
-	if !s.serving.CompareAndSwap(false, true) {
-		s.mu.Lock()
-		p := s.boundPort
-		s.mu.Unlock()
-		return p, nil
+// Start launches the symmetric HTTP sync server, UDP beacon broadcaster/listener, and event-driven sync loop.
+func (s *Syncer) Start(port int) (model.SyncStatus, error) {
+	if !s.started.CompareAndSwap(false, true) {
+		return s.Status(), nil
 	}
 	if port <= 0 {
 		port = DefaultPort
@@ -178,19 +140,19 @@ func (s *Syncer) StartServer(port int) (int, error) {
 	if err != nil {
 		ln, err = net.Listen("tcp4", "0.0.0.0:0")
 		if err != nil {
-			s.serving.Store(false)
-			return 0, err
+			s.started.Store(false)
+			return s.Status(), err
 		}
 	}
 	bound := ln.Addr().(*net.TCPAddr).Port
 	s.mu.Lock()
-	s.listening = true
+	s.running = true
 	s.boundPort = bound
 	s.mu.Unlock()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/challenge", s.handleChallenge)
+	mux.HandleFunc("/sync/ping", s.handlePing)
+	mux.HandleFunc("/sync/pair", s.handlePair)
 	mux.HandleFunc("/state", s.handleState)
 	mux.HandleFunc("/assets/", s.handleAsset)
 
@@ -199,90 +161,240 @@ func (s *Syncer) StartServer(port int) (int, error) {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() { _ = srv.Serve(ln) }()
-	go s.serveDiscovery(bound)
+	go s.runUDPDiscovery(bound)
+	go s.eventDrivenLoop()
+
+	// Initial startup sync after 1.5s
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		s.Nudge()
+	}()
+
 	s.emitStatus()
-	return bound, nil
+	return s.Status(), nil
 }
 
-// StartWatcher begins active LAN peer discovery and event-driven state exchange.
-func (s *Syncer) StartWatcher() {
-	if !s.started.CompareAndSwap(false, true) {
-		return
+// GeneratePairingCode creates a 6-digit one-time pairing code valid for 5 minutes.
+func (s *Syncer) GeneratePairingCode() (string, int64, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(900000))
+	if err != nil {
+		return "", 0, err
 	}
-	go s.exchangeLoop()
-}
-
-func (s *Syncer) Address() string {
+	code := fmt.Sprintf("%06d", n.Int64()+100000)
+	exp := time.Now().UnixMilli() + pairingTTLMs
 	s.mu.Lock()
-	port := s.boundPort
+	s.pairingCode = code
+	s.pairingExp = exp
+	s.lastError = ""
 	s.mu.Unlock()
-	if port == 0 {
-		return ""
+	s.emitStatus()
+	return code, exp, nil
+}
+
+// PairWithPeer exchanges a 6-digit code with a peer at ip:port and persists the shared HMAC secret.
+func (s *Syncer) PairWithPeer(rawIP string, port int, code string) (model.PairedPeer, error) {
+	ip, parsedPort := splitHostPortDefault(rawIP, port)
+	if ip == "" {
+		return model.PairedPeer{}, fmt.Errorf("请输入有效的局域网 IP")
 	}
-	return fmt.Sprintf("%s:%d", lanIP(), port)
+	cleanCode := strings.TrimSpace(code)
+	if len(cleanCode) != 6 {
+		return model.PairedPeer{}, fmt.Errorf("请输入 6 位数字配对码")
+	}
+
+	s.mu.Lock()
+	myID := s.deviceID
+	myName := s.deviceName
+	myPort := s.boundPort
+	s.mu.Unlock()
+	if myPort == 0 {
+		myPort = DefaultPort
+	}
+
+	payload, _ := json.Marshal(pairReq{
+		DeviceID:   myID,
+		DeviceName: myName,
+		Code:       cleanCode,
+		HTTPPort:   myPort,
+	})
+	client := &http.Client{Timeout: exchangeWait}
+	url := fmt.Sprintf("http://%s:%d/sync/pair", ip, parsedPort)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return model.PairedPeer{}, fmt.Errorf("无法连接 %s:%d（请确认同一 Wi-Fi）", ip, parsedPort)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		msg := strings.TrimSpace(string(bodyBytes))
+		if msg == "" {
+			msg = fmt.Sprintf("配对失败 (%d)", resp.StatusCode)
+		}
+		return model.PairedPeer{}, fmt.Errorf("%s", msg)
+	}
+
+	var pr pairResp
+	if err := json.Unmarshal(bodyBytes, &pr); err != nil || pr.DeviceID == "" || pr.PairingSecret == "" {
+		return model.PairedPeer{}, fmt.Errorf("解析配对响应失败")
+	}
+
+	peer := model.PairedPeer{
+		DeviceID:      pr.DeviceID,
+		DeviceName:    pr.DeviceName,
+		PairingSecret: pr.PairingSecret,
+		LastIP:        ip,
+		LastPort:      parsedPort,
+		Online:        true,
+	}
+	if err := s.store.UpsertSyncPeer(peer); err != nil {
+		return model.PairedPeer{}, err
+	}
+	s.mu.Lock()
+	s.peerSecrets[peer.DeviceID] = peer.PairingSecret
+	s.lastError = ""
+	s.mu.Unlock()
+	s.emitStatus()
+
+	// Trigger immediate bidirectional sync right after pairing
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = s.SyncPeerByID(peer.DeviceID)
+	}()
+	return peer, nil
+}
+
+// DeletePairedPeer unpairs a device and removes its secret.
+func (s *Syncer) DeletePairedPeer(deviceID string) error {
+	if err := s.store.DeleteSyncPeer(deviceID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.peerSecrets, deviceID)
+	delete(s.peerHeard, deviceID)
+	s.mu.Unlock()
+	s.emitStatus()
+	return nil
+}
+
+// Nudge schedules an immediate debounced sync across online paired peers.
+func (s *Syncer) Nudge() {
+	select {
+	case s.nudgeCh <- struct{}{}:
+	default:
+	}
+}
+
+// SyncAllPaired synchronizes with all reachable paired peers once.
+func (s *Syncer) SyncAllPaired() error {
+	if !s.syncInFlight.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer s.syncInFlight.Store(false)
+
+	peers, err := s.store.ListSyncPeers()
+	if err != nil || len(peers) == 0 {
+		return err
+	}
+	var lastErr error
+	for _, p := range peers {
+		if err := s.syncSinglePeer(p); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// SyncPeerByID synchronizes with a specific paired device immediately.
+func (s *Syncer) SyncPeerByID(deviceID string) error {
+	peers, err := s.store.ListSyncPeers()
+	if err != nil {
+		return err
+	}
+	for _, p := range peers {
+		if p.DeviceID == deviceID {
+			if err := s.syncSinglePeer(p); err != nil {
+				s.mu.Lock()
+				s.lastError = err.Error()
+				s.mu.Unlock()
+				s.emitStatus()
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("未找到该已配对设备")
 }
 
 func (s *Syncer) Status() model.SyncStatus {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	now := time.Now().UnixMilli()
-	anyOK := false
-	anyRefused := false
-	var maxRetry int64
-	peers := make([]model.PeerStatus, 0, len(s.peers))
-	for _, p := range s.peers {
-		if p.ok {
-			anyOK = true
+	s.mu.Lock()
+	for id, d := range s.discovered {
+		if now-d.LastSeenMs > peerStaleMs {
+			delete(s.discovered, id)
 		}
-		if p.refused {
-			anyRefused = true
-		}
-		if p.lockedUntil > maxRetry {
-			maxRetry = p.lockedUntil
-		}
-		state := "ok"
-		var retry int64
-		if p.refused {
-			state = "wrong"
-		} else if p.lockedUntil > now {
-			state = "locked"
-			retry = (p.lockedUntil - now + 999) / 1000
-		}
-		peers = append(peers, model.PeerStatus{
-			Addr:  p.addr,
-			OK:    p.ok,
-			At:    p.at,
-			Typed: p.typed,
-			Pair:  state,
-			Retry: retry,
-		})
+	}
+	activeCode := ""
+	activeExp := int64(0)
+	if s.pairingCode != "" && now <= s.pairingExp {
+		activeCode = s.pairingCode
+		activeExp = s.pairingExp
+	} else {
+		s.pairingCode = ""
+		s.pairingExp = 0
 	}
 
-	pair := "ok"
-	var retrySec int64
-	if s.prover == "" && !s.listening {
-		pair = "need"
-	} else if anyRefused && !anyOK {
-		pair = "wrong"
-	} else if maxRetry > now && !anyOK {
-		pair = "locked"
-		retrySec = (maxRetry - now + 999) / 1000
+	discCopy := make(map[string]model.DiscoveredPeer, len(s.discovered))
+	for k, v := range s.discovered {
+		discCopy[k] = v
+	}
+	running := s.running
+	port := s.boundPort
+	devID := s.deviceID
+	devName := s.deviceName
+	syncedAt := s.syncedAt
+	lastErr := s.lastError
+	s.mu.Unlock()
+
+	savedPeers, _ := s.store.ListSyncPeers()
+	pairedSet := make(map[string]struct{}, len(savedPeers))
+	pairedOut := make([]model.PairedPeer, 0, len(savedPeers))
+	for _, p := range savedPeers {
+		pairedSet[p.DeviceID] = struct{}{}
+		if d, ok := discCopy[p.DeviceID]; ok {
+			p.Online = true
+			p.LastIP = d.IP
+			p.LastPort = d.HTTPPort
+		} else {
+			p.Online = false
+		}
+		pairedOut = append(pairedOut, p)
+	}
+
+	unpairedDisc := make([]model.DiscoveredPeer, 0, len(discCopy))
+	for id, d := range discCopy {
+		if _, isPaired := pairedSet[id]; !isPaired {
+			unpairedDisc = append(unpairedDisc, d)
+		}
 	}
 
 	addr := ""
-	if s.boundPort > 0 {
-		addr = fmt.Sprintf("%s:%d", lanIP(), s.boundPort)
+	if port > 0 {
+		addr = fmt.Sprintf("%s:%d", lanIP(), port)
 	}
+
 	return model.SyncStatus{
-		Listening:   s.listening,
-		Address:     addr,
-		PairCode:    s.pairing.Code(),
-		Peers:       peers,
-		Unreachable: len(s.peers) > 0 && !anyOK,
-		SyncedAt:    s.syncedAt,
-		Pair:        pair,
-		Retry:       retrySec,
+		Running:           running,
+		DeviceID:          devID,
+		DeviceName:        devName,
+		Address:           addr,
+		HTTPPort:          port,
+		ActivePairingCode: activeCode,
+		PairingExpiresAt:  activeExp,
+		PairedPeers:       pairedOut,
+		DiscoveredPeers:   unpairedDisc,
+		SyncedAt:          syncedAt,
+		LastError:         lastErr,
 	}
 }
 
@@ -303,90 +415,151 @@ func (s *Syncer) emitStatus() {
 	s.emit(model.SyncEvent{Type: "status", Status: &st})
 }
 
-func (s *Syncer) requireAuth(w http.ResponseWriter, r *http.Request) bool {
-	verdict, left := s.pairing.Verify(r.Header.Get(auth.NonceHeader), r.Header.Get(auth.ProofHeader))
-	switch verdict {
-	case auth.VerdictOK:
-		return true
-	case auth.VerdictLocked:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": "too many attempts",
-			"retry": int64(left.Seconds()) + 1,
-		})
-		return false
-	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
-		return false
-	}
-}
+// MARK: - HTTP Handlers
 
-func (s *Syncer) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (s *Syncer) handlePing(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	id, name := s.deviceID, s.deviceName
+	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"ok":true}`))
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":         true,
+		"deviceId":   id,
+		"deviceName": name,
+	})
 }
 
-func (s *Syncer) handleChallenge(w http.ResponseWriter, _ *http.Request) {
-	nonce, err := s.pairing.IssueNonce()
+func (s *Syncer) handlePair(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req pairReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+		http.Error(w, "无效的配对请求", http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UnixMilli()
+
+	s.mu.Lock()
+	valid := s.pairingCode != "" && now <= s.pairingExp && strings.TrimSpace(req.Code) == s.pairingCode
+	if !valid {
+		s.mu.Unlock()
+		http.Error(w, "配对码错误或已过期", http.StatusForbidden)
+		return
+	}
+	secret := randomHex(32)
+	s.pairingCode = ""
+	s.pairingExp = 0
+	s.peerSecrets[req.DeviceID] = secret
+	myID := s.deviceID
+	myName := s.deviceName
+	s.mu.Unlock()
+
+	hostIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	peerPort := req.HTTPPort
+	if peerPort <= 0 {
+		peerPort = DefaultPort
+	}
+	_ = s.store.UpsertSyncPeer(model.PairedPeer{
+		DeviceID:      req.DeviceID,
+		DeviceName:    req.DeviceName,
+		PairingSecret: secret,
+		LastIP:        hostIP,
+		LastPort:      peerPort,
+	})
+	s.emitStatus()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(pairResp{
+		DeviceID:      myID,
+		DeviceName:    myName,
+		PairingSecret: secret,
+	})
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		s.Nudge()
+	}()
+}
+
+func (s *Syncer) verifyHMAC(r *http.Request) (string, error) {
+	devID := strings.TrimSpace(r.Header.Get("X-Todo-Device-Id"))
+	tsStr := strings.TrimSpace(r.Header.Get("X-Todo-Timestamp"))
+	sig := strings.TrimSpace(r.Header.Get("X-Todo-Signature"))
+	if devID == "" || tsStr == "" || sig == "" {
+		return "", fmt.Errorf("缺少签名头")
+	}
+	ts, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("时间戳非法")
+	}
+	diff := time.Now().UnixMilli() - ts
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 10*60*1000 {
+		return "", fmt.Errorf("时钟偏差过大")
+	}
+	s.mu.Lock()
+	secret := s.peerSecrets[devID]
+	s.mu.Unlock()
+	if secret == "" {
+		return "", fmt.Errorf("设备尚未配对")
+	}
+	expected := signHMAC(secret, fmt.Sprintf("%s|%s|%s", r.Method, r.URL.RequestURI(), tsStr))
+	if !hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(sig))) {
+		return "", fmt.Errorf("HMAC 签名校验失败")
+	}
+	return devID, nil
+}
+
+func (s *Syncer) handleState(w http.ResponseWriter, r *http.Request) {
+	peerDevID, err := s.verifyHMAC(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req exchangeReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	mergedTasks, mergedTags, mergedLists, err := s.store.Upsert(req.Tasks, req.Tags, req.Lists)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"nonce": nonce})
-}
-
-func (s *Syncer) handleState(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuth(w, r) {
+	tasks, tags, lists, at, err := s.store.ChangesSince(req.Since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	switch r.Method {
-	case http.MethodGet:
-		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-		tasks, tags, lists, at, err := s.store.ChangesSince(since)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(exchangeResp{Tasks: tasks, Tags: tags, Lists: lists, At: at})
+	now := time.Now().UnixMilli()
+	hostIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	_ = s.store.UpdatePeerSyncMeta(peerDevID, hostIP, DefaultPort, now)
 
-	case http.MethodPost:
-		var req exchangeReq
-		if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		mergedTasks, mergedTags, mergedLists, err := s.store.Upsert(req.Tasks, req.Tags, req.Lists)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		tasks, tags, lists, at, err := s.store.ChangesSince(req.Since)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if len(mergedTasks) > 0 || len(mergedTags) > 0 || len(mergedLists) > 0 {
-			s.mu.Lock()
-			s.syncedAt = time.Now().UnixMilli()
-			s.mu.Unlock()
-			s.emit(model.SyncEvent{Type: "rows", Tasks: mergedTasks, Tags: mergedTags, Lists: mergedLists, At: at})
-			s.emitStatus()
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(exchangeResp{Tasks: tasks, Tags: tags, Lists: lists, At: at})
+	s.mu.Lock()
+	s.syncedAt = now
+	s.lastError = ""
+	s.mu.Unlock()
 
-	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	if len(mergedTasks) > 0 || len(mergedTags) > 0 || len(mergedLists) > 0 {
+		s.emit(model.SyncEvent{Type: "rows", Tasks: mergedTasks, Tags: mergedTags, Lists: mergedLists, At: at})
 	}
+	s.emitStatus()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(exchangeResp{Tasks: tasks, Tags: tags, Lists: lists, At: at})
 }
 
 func (s *Syncer) handleAsset(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuth(w, r) {
+	if _, err := s.verifyHMAC(r); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/assets/")
@@ -425,53 +598,61 @@ func (s *Syncer) handleAsset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Syncer) serveDiscovery(port int) {
+// MARK: - UDP Discovery (Broadcast + Listen, TradeFlow v2 style)
+
+func (s *Syncer) runUDPDiscovery(httpPort int) {
 	conn, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", DiscoveryPort))
 	if err != nil {
-		return
-	}
-	defer conn.Close()
-	buf := make([]byte, 512)
-	reply := []byte(fmt.Sprintf("%s%d", offerPrefix, port))
-	for {
-		n, addr, err := conn.ReadFrom(buf)
+		conn, err = net.ListenPacket("udp4", "0.0.0.0:0")
 		if err != nil {
 			return
 		}
-		if string(buf[:n]) == probeMsg {
-			_, _ = conn.WriteTo(reply, addr)
-		}
-	}
-}
-
-func (s *Syncer) discoverPeers() []string {
-	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
-	if err != nil {
-		return nil
 	}
 	defer conn.Close()
 
-	for _, bcast := range broadcastAddresses() {
-		_, _ = conn.WriteTo([]byte(probeMsg), &net.UDPAddr{IP: bcast, Port: DiscoveryPort})
-	}
-	_, _ = conn.WriteTo([]byte(probeMsg), &net.UDPAddr{IP: net.IPv4bcast, Port: DiscoveryPort})
+	// Periodic beacon broadcaster (every 3s)
+	go func() {
+		ticker := time.NewTicker(beaconEvery)
+		defer ticker.Stop()
+		sendBeacon := func() {
+			s.mu.Lock()
+			b := udpBeacon{
+				App:        "todo",
+				V:          3,
+				DeviceID:   s.deviceID,
+				DeviceName: s.deviceName,
+				HTTPPort:   httpPort,
+			}
+			s.mu.Unlock()
+			raw, err := json.Marshal(b)
+			if err != nil {
+				return
+			}
+			for _, bcast := range broadcastAddresses() {
+				_, _ = conn.WriteTo(raw, &net.UDPAddr{IP: bcast, Port: DiscoveryPort})
+			}
+			_, _ = conn.WriteTo(raw, &net.UDPAddr{IP: net.IPv4bcast, Port: DiscoveryPort})
+		}
+		sendBeacon()
+		for {
+			select {
+			case <-ticker.C:
+				sendBeacon()
+			case <-s.stopCh:
+				return
+			}
+		}
+	}()
 
-	deadline := time.Now().Add(650 * time.Millisecond)
-	_ = conn.SetReadDeadline(deadline)
-	buf := make([]byte, 512)
-	seen := map[string]struct{}{}
-	var out []string
+	// Beacon receiver loop
+	buf := make([]byte, 1024)
 	for {
 		n, from, err := conn.ReadFrom(buf)
 		if err != nil {
-			break
+			return
 		}
-		text := strings.TrimSpace(string(buf[:n]))
-		if !strings.HasPrefix(text, offerPrefix) {
-			continue
-		}
-		port, err := strconv.Atoi(strings.TrimPrefix(text, offerPrefix))
-		if err != nil || port <= 0 || port > 65535 {
+		var b udpBeacon
+		if json.Unmarshal(buf[:n], &b) != nil || b.App != "todo" || b.V != 3 || b.DeviceID == "" {
 			continue
 		}
 		udpFrom, ok := from.(*net.UDPAddr)
@@ -479,200 +660,156 @@ func (s *Syncer) discoverPeers() []string {
 			continue
 		}
 		ip4 := udpFrom.IP.To4()
-		if ip4 == nil || s.isSelf(ip4, port) {
+		if ip4 == nil {
 			continue
 		}
-		addr := fmt.Sprintf("%s:%d", ip4.String(), port)
-		if _, dup := seen[addr]; !dup {
-			seen[addr] = struct{}{}
-			out = append(out, addr)
-		}
-	}
-	return out
-}
-
-func (s *Syncer) isSelf(ip net.IP, port int) bool {
-	s.mu.Lock()
-	bound := s.boundPort
-	s.mu.Unlock()
-	if bound == 0 || bound != port {
-		return false
-	}
-	for _, local := range localIPv4s() {
-		if local.Equal(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Syncer) exchangeLoop() {
-	client := &http.Client{Timeout: exchangeWait}
-	lastProbe := time.Time{}
-	missed := 0
-
-	for {
-		s.mu.Lock()
-		code := s.prover
-		peerCount := len(s.peers)
-		s.mu.Unlock()
-
-		if code == "" {
-			s.waitNext(2 * time.Second)
-			continue
-		}
-
-		if peerCount == 0 || time.Since(lastProbe) > 15*time.Second {
-			found := s.discoverPeers()
-			lastProbe = time.Now()
-			if len(found) > 0 {
-				s.mergeDiscovered(found)
-			}
-		}
+		now := time.Now().UnixMilli()
+		shouldTriggerSync := false
+		shouldEmitStatus := false
 
 		s.mu.Lock()
-		targets := make([]*peerEntry, len(s.peers))
-		copy(targets, s.peers)
-		s.mu.Unlock()
-
-		if len(targets) == 0 {
-			missed++
-			s.waitNext(backoff(missed))
-			continue
-		}
-
-		anyOK := false
-		for _, peer := range targets {
-			now := time.Now().UnixMilli()
-			s.mu.Lock()
-			skip := peer.refused || peer.lockedUntil > now
-			since := peer.heard - clockMarginMs
-			if since < 0 {
-				since = 0
-			}
+		if b.DeviceID == s.deviceID {
 			s.mu.Unlock()
-			if skip {
-				continue
-			}
-
-			ok := s.syncWithPeer(client, peer, code, since)
-			if ok {
-				anyOK = true
-			}
+			continue
 		}
+		prev, existed := s.discovered[b.DeviceID]
+		wasOffline := !existed || (now-prev.LastSeenMs > peerStaleMs)
+		peer := model.DiscoveredPeer{
+			DeviceID:   b.DeviceID,
+			DeviceName: b.DeviceName,
+			IP:         ip4.String(),
+			HTTPPort:   b.HTTPPort,
+			LastSeenMs: now,
+		}
+		s.discovered[b.DeviceID] = peer
+		if wasOffline || prev.IP != peer.IP || prev.HTTPPort != peer.HTTPPort {
+			shouldEmitStatus = true
+		}
+		if wasOffline && s.peerSecrets[b.DeviceID] != "" {
+			shouldTriggerSync = true
+		}
+		s.mu.Unlock()
 
-		if anyOK {
-			missed = 0
-			s.waitNext(4 * time.Second)
-		} else {
-			missed++
-			lastProbe = time.Time{}
-			s.waitNext(backoff(missed))
+		if shouldEmitStatus {
+			s.emitStatus()
+		}
+		if shouldTriggerSync {
+			s.Nudge()
 		}
 	}
 }
 
-func (s *Syncer) syncWithPeer(client *http.Client, peer *peerEntry, code string, since int64) bool {
+// MARK: - Event-Driven Sync Loop (Zero wasteful polling)
+
+func (s *Syncer) eventDrivenLoop() {
+	for {
+		select {
+		case <-s.nudgeCh:
+			// Debounce rapid local edits by 800ms
+			time.Sleep(800 * time.Millisecond)
+			select {
+			case <-s.nudgeCh:
+			default:
+			}
+			_ = s.SyncAllPaired()
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *Syncer) syncSinglePeer(peer model.PairedPeer) error {
+	s.mu.Lock()
+	disc, isOnline := s.discovered[peer.DeviceID]
+	myID := s.deviceID
+	heard := s.peerHeard[peer.DeviceID]
+	s.mu.Unlock()
+
+	ip := peer.LastIP
+	port := peer.LastPort
+	if isOnline {
+		ip = disc.IP
+		port = disc.HTTPPort
+	}
+	if ip == "" {
+		return fmt.Errorf("未找到 %s 的局域网地址", peer.DeviceName)
+	}
+	if port <= 0 {
+		port = DefaultPort
+	}
+
+	since := heard - clockMarginMs
+	if since < 0 {
+		since = 0
+	}
 	tasks, tags, lists, _, err := s.store.ChangesSince(since)
 	if err != nil {
-		return false
+		return err
 	}
-	nonce, err := fetchNonce(client, peer.addr)
-	if err != nil {
-		s.markLost(peer)
-		return false
-	}
+
+	addr := fmt.Sprintf("%s:%d", ip, port)
 	body, _ := json.Marshal(exchangeReq{Tasks: tasks, Tags: tags, Lists: lists, Since: since})
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s/state", peer.addr), bytes.NewReader(body))
+	client := &http.Client{Timeout: exchangeWait}
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s/state", addr), bytes.NewReader(body))
 	if err != nil {
-		return false
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(auth.NonceHeader, nonce)
-	req.Header.Set(auth.ProofHeader, auth.Proof(code, nonce))
+	attachHMACHeaders(req, myID, peer.PairingSecret)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		s.markLost(peer)
-		return false
+		return fmt.Errorf("无法连接 %s (%s)", peer.DeviceName, addr)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		s.mu.Lock()
-		peer.ok = false
-		peer.refused = true
-		s.mu.Unlock()
-		s.emitStatus()
-		return false
-	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		var bodyMap map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&bodyMap)
-		retry := int64(60)
-		if v, ok := bodyMap["retry"].(float64); ok && v > 0 {
-			retry = int64(v)
-		}
-		s.mu.Lock()
-		peer.ok = false
-		peer.lockedUntil = time.Now().UnixMilli() + retry*1000
-		s.mu.Unlock()
-		s.emitStatus()
-		return false
+		return fmt.Errorf("%s 鉴权失败，请重新配对", peer.DeviceName)
 	}
 	if resp.StatusCode != http.StatusOK {
-		s.markLost(peer)
-		return false
+		return fmt.Errorf("同步失败 (%d)", resp.StatusCode)
 	}
 
 	var reply exchangeResp
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
-		return false
+		return err
 	}
 	mergedTasks, mergedTags, mergedLists, err := s.store.Upsert(reply.Tasks, reply.Tags, reply.Lists)
 	if err != nil {
-		return false
+		return err
 	}
 
-	// Sync missing attachment assets referenced by incoming or outgoing tasks.
-	s.syncMissingAssets(client, peer.addr, code, tasks, mergedTasks)
+	s.syncMissingAssets(client, addr, myID, peer.PairingSecret, tasks, mergedTasks)
 
 	now := time.Now().UnixMilli()
+	_ = s.store.UpdatePeerSyncMeta(peer.DeviceID, ip, port, now)
+
 	s.mu.Lock()
-	if reply.At > peer.heard {
-		peer.heard = reply.At
+	if reply.At > s.peerHeard[peer.DeviceID] {
+		s.peerHeard[peer.DeviceID] = reply.At
 	}
-	peer.ok = true
-	peer.at = now
-	peer.refused = false
-	peer.lockedUntil = 0
 	s.syncedAt = now
+	s.lastError = ""
 	s.mu.Unlock()
 
 	if len(mergedTasks) > 0 || len(mergedTags) > 0 || len(mergedLists) > 0 {
 		s.emit(model.SyncEvent{Type: "rows", Tasks: mergedTasks, Tags: mergedTags, Lists: mergedLists, At: reply.At})
 	}
 	s.emitStatus()
-	return true
+	return nil
 }
 
-func (s *Syncer) syncMissingAssets(client *http.Client, addr, code string, localTasks, remoteTasks []model.Task) {
-	// Download remote assets we don't have yet
+func (s *Syncer) syncMissingAssets(client *http.Client, addr, myID, secret string, localTasks, remoteTasks []model.Task) {
 	for _, t := range remoteTasks {
 		for _, asset := range t.Attachments {
 			if s.store.HasAsset(asset) {
-				continue
-			}
-			nonce, err := fetchNonce(client, addr)
-			if err != nil {
 				continue
 			}
 			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/assets/%s", addr, asset), nil)
 			if err != nil {
 				continue
 			}
-			req.Header.Set(auth.NonceHeader, nonce)
-			req.Header.Set(auth.ProofHeader, auth.Proof(code, nonce))
+			attachHMACHeaders(req, myID, secret)
 			resp, err := client.Do(req)
 			if err == nil && resp.StatusCode == http.StatusOK {
 				if data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)); err == nil {
@@ -684,23 +821,18 @@ func (s *Syncer) syncMissingAssets(client *http.Client, addr, code string, local
 			}
 		}
 	}
-	// Upload local assets referenced by recently updated tasks (skip if peer already has them)
 	for _, t := range localTasks {
 		for _, asset := range t.Attachments {
 			if s.peerHasAsset(addr, asset) {
 				continue
 			}
-			// Check with lightweight HEAD before transferring binary payload
-			if nonce, err := fetchNonce(client, addr); err == nil {
-				if headReq, err := http.NewRequest(http.MethodHead, fmt.Sprintf("http://%s/assets/%s", addr, asset), nil); err == nil {
-					headReq.Header.Set(auth.NonceHeader, nonce)
-					headReq.Header.Set(auth.ProofHeader, auth.Proof(code, nonce))
-					if headResp, err := client.Do(headReq); err == nil {
-						headResp.Body.Close()
-						if headResp.StatusCode == http.StatusOK {
-							s.markPeerAsset(addr, asset)
-							continue
-						}
+			if headReq, err := http.NewRequest(http.MethodHead, fmt.Sprintf("http://%s/assets/%s", addr, asset), nil); err == nil {
+				attachHMACHeaders(headReq, myID, secret)
+				if headResp, err := client.Do(headReq); err == nil {
+					headResp.Body.Close()
+					if headResp.StatusCode == http.StatusOK {
+						s.markPeerAsset(addr, asset)
+						continue
 					}
 				}
 			}
@@ -708,16 +840,11 @@ func (s *Syncer) syncMissingAssets(client *http.Client, addr, code string, local
 			if err != nil {
 				continue
 			}
-			nonce, err := fetchNonce(client, addr)
-			if err != nil {
-				continue
-			}
 			req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://%s/assets/%s", addr, asset), bytes.NewReader(data))
 			if err != nil {
 				continue
 			}
-			req.Header.Set(auth.NonceHeader, nonce)
-			req.Header.Set(auth.ProofHeader, auth.Proof(code, nonce))
+			attachHMACHeaders(req, myID, secret)
 			if resp, err := client.Do(req); err == nil {
 				if resp.StatusCode == http.StatusOK {
 					s.markPeerAsset(addr, asset)
@@ -749,95 +876,44 @@ func (s *Syncer) markPeerAsset(addr, name string) {
 	set[name] = struct{}{}
 }
 
-func fetchNonce(client *http.Client, addr string) (string, error) {
-	resp, err := client.Get(fmt.Sprintf("http://%s/challenge", addr))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("challenge status %d", resp.StatusCode)
-	}
-	var out struct {
-		Nonce string `json:"nonce"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Nonce == "" {
-		return "", fmt.Errorf("bad challenge")
-	}
-	return out.Nonce, nil
+func attachHMACHeaders(req *http.Request, deviceID, secret string) {
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	sig := signHMAC(secret, fmt.Sprintf("%s|%s|%s", req.Method, req.URL.RequestURI(), ts))
+	req.Header.Set("X-Todo-Device-Id", deviceID)
+	req.Header.Set("X-Todo-Timestamp", ts)
+	req.Header.Set("X-Todo-Signature", sig)
 }
 
-func (s *Syncer) mergeDiscovered(addrs []string) {
-	s.mu.Lock()
-	changed := false
-	for _, addr := range addrs {
-		exists := false
-		for _, p := range s.peers {
-			if p.addr == addr {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			s.peers = append(s.peers, &peerEntry{addr: addr})
-			changed = true
-		}
-	}
-	s.mu.Unlock()
-	if changed {
-		s.emitStatus()
-	}
+func signHMAC(secret, msg string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(msg))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Syncer) markLost(target *peerEntry) {
-	s.mu.Lock()
-	for i, p := range s.peers {
-		if p == target {
-			if p.typed {
-				p.ok = false
-			} else {
-				s.peers = append(s.peers[:i], s.peers[i+1:]...)
-			}
-			break
-		}
-	}
-	s.mu.Unlock()
-	s.emitStatus()
+func randomHex(nBytes int) string {
+	b := make([]byte, nBytes)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
-func (s *Syncer) waitNext(d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-s.nudgeCh:
-	case <-t.C:
-	case <-s.stopCh:
-	}
-}
-
-func backoff(missed int) time.Duration {
-	steps := []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second, 24 * time.Second, 30 * time.Second}
-	if missed <= 0 {
-		return steps[0]
-	}
-	if missed >= len(steps) {
-		return steps[len(steps)-1]
-	}
-	return steps[missed-1]
-}
-
-func normalizeAddr(raw string) string {
+func splitHostPortDefault(raw string, fallbackPort int) (string, int) {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimPrefix(s, "http://")
 	s = strings.TrimPrefix(s, "https://")
 	s = strings.TrimSuffix(s, "/")
 	if s == "" {
-		return ""
+		return "", fallbackPort
 	}
-	if !strings.Contains(s, ":") {
-		return fmt.Sprintf("%s:%d", s, DefaultPort)
+	if fallbackPort <= 0 {
+		fallbackPort = DefaultPort
 	}
-	return s
+	if host, portStr, err := net.SplitHostPort(s); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+			return host, p
+		}
+		return host, fallbackPort
+	}
+	return s, fallbackPort
 }
 
 func lanIP() string {
@@ -894,7 +970,7 @@ func broadcastAddresses() []net.IP {
 			continue
 		}
 		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
+			ipnet, ok := a.(*net.IPNet);
 			if !ok {
 				continue
 			}

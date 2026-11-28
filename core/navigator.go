@@ -9,7 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"navigator/core/internal/auth"
+	"runtime"
+
 	"navigator/core/internal/model"
 	"navigator/core/internal/store"
 	"navigator/core/internal/syncer"
@@ -27,22 +28,21 @@ func Open(dataDir string) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	sy := syncer.New(st)
-
-	// Restore persisted pairing code for host or peer role.
-	if hostCode := st.GetMeta("host_pair_code"); auth.IsValidCode(hostCode) {
-		_ = sy.SetHostCode(hostCode)
-	} else {
-		if code, err := sy.NewHostCode(); err == nil {
-			_ = st.SetMeta("host_pair_code", code)
+	devID := st.GetMeta("sync_device_id")
+	if devID == "" {
+		devID = newID("dev")
+		_ = st.SetMeta("sync_device_id", devID)
+	}
+	devName := st.GetMeta("sync_device_name")
+	if devName == "" {
+		if runtime.GOOS == "android" {
+			devName = "Android 手机"
+		} else {
+			devName = "Mac 桌面端"
 		}
+		_ = st.SetMeta("sync_device_name", devName)
 	}
-	if peerCode := st.GetMeta("peer_pair_code"); auth.IsValidCode(peerCode) {
-		_ = sy.SetPeerCode(peerCode)
-	}
-	if manualAddr := st.GetMeta("manual_peer_addr"); manualAddr != "" {
-		sy.AddManualPeer(manualAddr)
-	}
+	sy := syncer.New(st, devID, devName)
 
 	eng := &Engine{store: st, syncer: sy}
 	eng.ensureDefaultListsAndMigrate()
@@ -354,41 +354,36 @@ func (e *Engine) AssetPath(name string) string {
 	return e.store.AssetPath(name)
 }
 
-// StartSync launches LAN discovery/exchange; if serve is true (macOS), also starts the LAN HTTP server.
-func (e *Engine) StartSync(serve bool, port int) (string, error) {
-	if serve {
-		if _, err := e.syncer.StartServer(port); err != nil {
-			return "", err
-		}
-	}
-	e.syncer.StartWatcher()
-	return e.SyncStatusJSON(), nil
-}
-
-func (e *Engine) HostPairCode() string {
-	return e.syncer.HostCode()
-}
-
-func (e *Engine) RegeneratePairCode() (string, error) {
-	code, err := e.syncer.NewHostCode()
+// StartSync launches symmetric LAN discovery + HTTP server on both macOS and Android.
+func (e *Engine) StartSync(_ bool, port int) (string, error) {
+	st, err := e.syncer.Start(port)
 	if err != nil {
 		return "", err
 	}
-	_ = e.store.SetMeta("host_pair_code", code)
-	return code, nil
+	raw, _ := json.Marshal(st)
+	return string(raw), nil
 }
 
-func (e *Engine) SetPeerCode(code string) error {
-	if err := e.syncer.SetPeerCode(code); err != nil {
-		return err
+func (e *Engine) GeneratePairingCode() (string, error) {
+	code, _, err := e.syncer.GeneratePairingCode()
+	return code, err
+}
+
+func (e *Engine) PairWithPeer(ip string, port int, code string) (string, error) {
+	peer, err := e.syncer.PairWithPeer(ip, port, code)
+	if err != nil {
+		return "", err
 	}
-	_ = e.store.SetMeta("peer_pair_code", strings.TrimSpace(code))
-	return nil
+	raw, _ := json.Marshal(peer)
+	return string(raw), nil
 }
 
-func (e *Engine) AddPeerAddress(addr string) {
-	e.syncer.AddManualPeer(addr)
-	_ = e.store.SetMeta("manual_peer_addr", strings.TrimSpace(addr))
+func (e *Engine) DeletePairedPeer(deviceID string) error {
+	return e.syncer.DeletePairedPeer(deviceID)
+}
+
+func (e *Engine) SyncWithPeer(deviceID string) error {
+	return e.syncer.SyncPeerByID(deviceID)
 }
 
 func (e *Engine) SyncNow() {

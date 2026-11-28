@@ -111,26 +111,39 @@ type BoardState struct {
 	Seeded bool       `json:"seeded"`
 }
 
-// PeerStatus describes one LAN peer's sync health.
-type PeerStatus struct {
-	Addr  string `json:"addr"`
-	OK    bool   `json:"ok"`
-	At    int64  `json:"at"`
-	Typed bool   `json:"typed"`
-	Pair  string `json:"pair"` // "ok" | "wrong" | "locked"
-	Retry int64  `json:"retry"`
+// DiscoveredPeer represents an online TODO device discovered via UDP broadcast on the LAN.
+type DiscoveredPeer struct {
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
+	IP         string `json:"ip"`
+	HTTPPort   int    `json:"httpPort"`
+	LastSeenMs int64  `json:"lastSeenMs"`
 }
 
-// SyncStatus summarizes overall LAN sync state.
+// PairedPeer represents a persistently paired device stored in SQLite sync_peers.
+type PairedPeer struct {
+	DeviceID      string `json:"deviceId"`
+	DeviceName    string `json:"deviceName"`
+	PairingSecret string `json:"-"`
+	LastSyncAt    int64  `json:"lastSyncAt"`
+	LastIP        string `json:"lastIp"`
+	LastPort      int    `json:"lastPort"`
+	Online        bool   `json:"online"`
+}
+
+// SyncStatus summarizes overall LAN sync state (TradeFlow-style symmetric P2P).
 type SyncStatus struct {
-	Listening   bool         `json:"listening"`
-	Address     string       `json:"address"`
-	PairCode    string       `json:"pairCode,omitempty"`
-	Peers       []PeerStatus `json:"peers"`
-	Unreachable bool         `json:"unreachable"`
-	SyncedAt    int64        `json:"syncedAt"`
-	Pair        string       `json:"pair"` // "need" | "ok" | "wrong" | "locked"
-	Retry       int64        `json:"retry"`
+	Running           bool             `json:"running"`
+	DeviceID          string           `json:"deviceId"`
+	DeviceName        string           `json:"deviceName"`
+	Address           string           `json:"address"`
+	HTTPPort          int              `json:"httpPort"`
+	ActivePairingCode string           `json:"activePairingCode,omitempty"`
+	PairingExpiresAt  int64            `json:"pairingExpiresAt,omitempty"`
+	PairedPeers       []PairedPeer     `json:"pairedPeers"`
+	DiscoveredPeers   []DiscoveredPeer `json:"discoveredPeers"`
+	SyncedAt          int64            `json:"syncedAt"`
+	LastError         string           `json:"lastError,omitempty"`
 }
 
 // SyncEvent is pushed to native UI listeners via callback.

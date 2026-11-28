@@ -31,8 +31,8 @@ class CoreRepository(context: Context) {
                     .onSuccess(onEvent)
             }
         })
-        // Phone acts as active LAN watcher/client; Mac serves on port 8787.
-        val raw = runCatching { engine.startSync(false, 8787) }.getOrDefault("{}")
+        // Symmetric P2P: Android also runs HTTP sync server + UDP beacon on LAN.
+        val raw = runCatching { engine.startSync(true, 8787) }.getOrDefault("{}")
         return runCatching { json.decodeFromString<SyncStatus>(raw) }.getOrDefault(SyncStatus())
     }
 
@@ -78,12 +78,28 @@ class CoreRepository(context: Context) {
         runCatching { engine.deleteTag(id) }
     }
 
-    fun setPeerCode(code: String) {
-        runCatching { engine.setPeerCode(code) }
+    fun generatePairingCode(): String {
+        return runCatching { engine.generatePairingCode() }.getOrDefault("")
     }
 
-    fun addPeerAddress(addr: String) {
-        runCatching { engine.addPeerAddress(addr) }
+    fun pairWithPeer(ip: String, port: Int, code: String): Result<com.lele.navigator.model.PairedPeer> {
+        return runCatching {
+            val raw = engine.pairWithPeer(ip, port.toLong(), code)
+            json.decodeFromString<com.lele.navigator.model.PairedPeer>(raw)
+        }
+    }
+
+    fun deletePairedPeer(deviceId: String) {
+        runCatching { engine.deletePairedPeer(deviceId) }
+    }
+
+    fun syncWithPeer(deviceId: String): String? {
+        return try {
+            engine.syncWithPeer(deviceId)
+            null
+        } catch (e: Exception) {
+            e.message ?: "同步失败"
+        }
     }
 
     fun syncNow() {

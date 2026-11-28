@@ -261,51 +261,56 @@ func NavStartSync(serve C.int, port C.int) *C.char {
 	return strOut(s)
 }
 
-//export NavHostPairCode
-func NavHostPairCode() *C.char {
+//export NavGeneratePairingCode
+func NavGeneratePairingCode() *C.char {
 	engMu.Lock()
 	eng := engine
 	engMu.Unlock()
 	if eng == nil {
 		return strOut("")
 	}
-	return strOut(eng.HostPairCode())
-}
-
-//export NavRegeneratePairCode
-func NavRegeneratePairCode() *C.char {
-	engMu.Lock()
-	eng := engine
-	engMu.Unlock()
-	if eng == nil {
-		return strOut("")
-	}
-	code, err := eng.RegeneratePairCode()
+	code, err := eng.GeneratePairingCode()
 	if err != nil {
 		return strOut("")
 	}
 	return strOut(code)
 }
 
-//export NavSetPeerCode
-func NavSetPeerCode(code *C.char) *C.char {
+//export NavPairWithPeer
+func NavPairWithPeer(ip *C.char, port C.int, code *C.char) *C.char {
 	engMu.Lock()
 	eng := engine
 	engMu.Unlock()
 	if eng == nil {
 		return strOut(`{"error":"engine not open"}`)
 	}
-	return errJSON(eng.SetPeerCode(C.GoString(code)))
+	s, err := eng.PairWithPeer(C.GoString(ip), int(port), C.GoString(code))
+	if err != nil {
+		return errJSON(err)
+	}
+	return strOut(s)
 }
 
-//export NavAddPeerAddress
-func NavAddPeerAddress(addr *C.char) {
+//export NavDeletePairedPeer
+func NavDeletePairedPeer(deviceID *C.char) *C.char {
 	engMu.Lock()
 	eng := engine
 	engMu.Unlock()
-	if eng != nil {
-		eng.AddPeerAddress(C.GoString(addr))
+	if eng == nil {
+		return strOut(`{"error":"engine not open"}`)
 	}
+	return errJSON(eng.DeletePairedPeer(C.GoString(deviceID)))
+}
+
+//export NavSyncWithPeer
+func NavSyncWithPeer(deviceID *C.char) *C.char {
+	engMu.Lock()
+	eng := engine
+	engMu.Unlock()
+	if eng == nil {
+		return strOut(`{"error":"engine not open"}`)
+	}
+	return errJSON(eng.SyncWithPeer(C.GoString(deviceID)))
 }
 
 //export NavSyncNow

@@ -206,51 +206,65 @@ struct SidebarView: View {
 
             Divider()
 
-            // Bottom Bar: + 添加列表 (left) + Sync dot & Settings (right)
-            HStack(spacing: 8) {
+            // Bottom Bar: + 添加列表 (left) + Live Sync Status Pill & Settings (right)
+            HStack(spacing: 6) {
                 Button {
                     store.showAddListSheet = true
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: "plus.circle")
-                            .font(.system(size: 13.5))
-                        Text("添加列表")
                             .font(.system(size: 13))
+                        Text("添加列表")
+                            .font(.system(size: 12))
                     }
                     .foregroundStyle(.secondary)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 3)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
 
                 Spacer()
 
+                let badge = store.syncBadgeInfo
                 Button {
                     store.openSettings(tab: .sync)
                 } label: {
-                    Circle()
-                        .fill(syncDotColor)
-                        .frame(width: 7, height: 7)
-                        .frame(width: 20, height: 20)
-                        .contentShape(Rectangle())
+                    HStack(spacing: 5) {
+                        if store.isSyncing {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .scaleEffect(0.65)
+                        } else {
+                            Circle()
+                                .fill(badge.color)
+                                .frame(width: 6.5, height: 6.5)
+                        }
+                        Text(badge.label)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3.5)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .help(syncTooltip)
+                .help(badge.detail)
 
                 Button {
                     store.openSettings(tab: .general)
                 } label: {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 13))
+                        .font(.system(size: 12.5))
                         .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
+                        .frame(width: 20, height: 20)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("设置 (⌘,)")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
         }
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
         .onChange(of: store.focusSearchTrigger) { _, _ in
@@ -266,16 +280,6 @@ struct SidebarView: View {
         store.inspectorTaskID = nil
         store.searchQuery = ""
         store.section = next
-    }
-
-    private var syncDotColor: Color {
-        if store.syncStatus.syncedAt > 0 { return NavTheme.logbookGreen }
-        return store.syncStatus.listening ? NavTheme.accentBlue : .gray
-    }
-
-    private var syncTooltip: String {
-        if store.syncStatus.syncedAt > 0 { return "局域网已同步" }
-        return store.syncStatus.listening ? "等待局域网同步" : "离线"
     }
 }
 

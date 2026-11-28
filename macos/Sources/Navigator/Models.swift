@@ -223,26 +223,39 @@ struct BoardState: Codable {
     var seeded: Bool
 }
 
-struct PeerStatus: Codable, Identifiable, Equatable {
-    var addr: String
-    var ok: Bool
-    var at: Int64
-    var typed: Bool
-    var pair: String
-    var retry: Int64
+struct DiscoveredPeer: Codable, Identifiable, Equatable {
+    var deviceId: String
+    var deviceName: String
+    var ip: String
+    var httpPort: Int
+    var lastSeenMs: Int64
 
-    var id: String { addr }
+    var id: String { deviceId }
+}
+
+struct PairedPeer: Codable, Identifiable, Equatable {
+    var deviceId: String
+    var deviceName: String
+    var lastSyncAt: Int64 = 0
+    var lastIp: String = ""
+    var lastPort: Int = 8787
+    var online: Bool = false
+
+    var id: String { deviceId }
 }
 
 struct SyncStatus: Codable, Equatable {
-    var listening: Bool = false
+    var running: Bool = false
+    var deviceId: String = ""
+    var deviceName: String = "Mac 桌面端"
     var address: String = ""
-    var pairCode: String?
-    var peers: [PeerStatus] = []
-    var unreachable: Bool = false
+    var httpPort: Int = 8787
+    var activePairingCode: String?
+    var pairingExpiresAt: Int64?
+    var pairedPeers: [PairedPeer] = []
+    var discoveredPeers: [DiscoveredPeer] = []
     var syncedAt: Int64 = 0
-    var pair: String = "ok"
-    var retry: Int64 = 0
+    var lastError: String?
 }
 
 struct SyncEvent: Codable {

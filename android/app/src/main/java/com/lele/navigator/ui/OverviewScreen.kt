@@ -56,37 +56,56 @@ fun OverviewScreen(
             .background(c.hubBackground)
             .statusBarsPadding()
     ) {
-        // Compact Top Utility Bar
+        // Compact Top Utility Bar with Live Sync Status Pill
+        val sync = state.syncStatus
+        val onlinePaired = sync.pairedPeers.count { it.online }
+        val (dotColor, syncText) = when {
+            state.isSyncing -> c.accentBlue to "同步中…"
+            !sync.lastError.isNullOrBlank() -> c.danger to "同步异常"
+            sync.pairedPeers.isNotEmpty() && sync.syncedAt > 0L -> {
+                val timeStr = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                    .format(java.util.Date(sync.syncedAt))
+                (if (onlinePaired > 0) c.logbookGreen else c.logbookGreen.copy(alpha = 0.7f)) to "已同步 · $timeStr"
+            }
+            onlinePaired > 0 -> c.logbookGreen to "$onlinePaired 台在线"
+            sync.pairedPeers.isNotEmpty() -> c.inkTertiary to "已配对 · 离线"
+            sync.discoveredPeers.isNotEmpty() -> c.todayGold to "发现 ${sync.discoveredPeers.size} 台设备"
+            else -> (if (sync.running) c.accentBlue else c.inkTertiary) to "未配对"
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 2.dp),
+                .padding(horizontal = 14.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(c.cardSurface)
                     .clickable(onClick = onOpenSync)
-                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                    .padding(horizontal = 9.dp, vertical = 4.dp)
             ) {
-                Box(
-                    Modifier
-                        .size(6.5.dp)
-                        .clip(CircleShape)
-                        .background(
-                            when {
-                                state.syncStatus.syncedAt > 0 -> c.logbookGreen
-                                state.syncStatus.pair == "wrong" || state.syncStatus.pair == "locked" -> c.danger
-                                else -> c.accentBlue
-                            }
-                        )
-                )
+                if (state.isSyncing) {
+                    CircularProgressIndicator(
+                        strokeWidth = 1.6.dp,
+                        color = c.accentBlue,
+                        modifier = Modifier.size(11.dp)
+                    )
+                } else {
+                    Box(
+                        Modifier
+                            .size(6.5.dp)
+                            .clip(CircleShape)
+                            .background(dotColor)
+                    )
+                }
                 Text(
-                    text = if (state.syncStatus.syncedAt > 0) "已同步" else "局域网同步",
-                    fontSize = 12.sp,
-                    color = c.inkSecondary,
+                    text = syncText,
+                    fontSize = 11.5.sp,
+                    color = c.inkPrimary,
                     fontWeight = FontWeight.Medium
                 )
             }

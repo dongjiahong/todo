@@ -80,12 +80,20 @@ func (m *NavigatorMobile) StartSync(serve bool, port int) (string, error) {
 	return m.engine.StartSync(serve, port)
 }
 
-func (m *NavigatorMobile) SetPeerCode(code string) error {
-	return m.engine.SetPeerCode(code)
+func (m *NavigatorMobile) GeneratePairingCode() (string, error) {
+	return m.engine.GeneratePairingCode()
 }
 
-func (m *NavigatorMobile) AddPeerAddress(addr string) {
-	m.engine.AddPeerAddress(addr)
+func (m *NavigatorMobile) PairWithPeer(ip string, port int, code string) (string, error) {
+	return m.engine.PairWithPeer(ip, port, code)
+}
+
+func (m *NavigatorMobile) DeletePairedPeer(deviceID string) error {
+	return m.engine.DeletePairedPeer(deviceID)
+}
+
+func (m *NavigatorMobile) SyncWithPeer(deviceID string) error {
+	return m.engine.SyncWithPeer(deviceID)
 }
 
 func (m *NavigatorMobile) SyncNow() {

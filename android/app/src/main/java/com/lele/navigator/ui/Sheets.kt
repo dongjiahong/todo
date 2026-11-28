@@ -418,121 +418,468 @@ fun QuickCaptureSheet(
 @Composable
 fun SyncPairingSheet(
     state: NavigatorUiState,
-    onDismiss: () -> Unit,
-    onPair: (String, String) -> Unit,
-    onSyncNow: () -> Unit
+    vm: NavigatorViewModel,
+    onDismiss: () -> Unit
 ) {
     val c = ThingsTheme.colors
-    var code by remember { mutableStateOf("") }
-    var addr by remember { mutableStateOf("") }
+    val context = LocalContext.current
     val sync = state.syncStatus
+
+    var pairTarget by remember { mutableStateOf<com.lele.navigator.model.DiscoveredPeer?>(null) }
+    var manualIp by remember { mutableStateOf("") }
+    var pairCode by remember { mutableStateOf("") }
+    var busyMsg by remember { mutableStateOf<String?>(null) }
+    var resultMsg by remember { mutableStateOf<String?>(null) }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    // Auto-refresh discovered peers and online states every 3s while sheet is open
+    LaunchedEffect(Unit) {
+        while (true) {
+            vm.refreshSyncStatus()
+            delay(3000L)
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = c.cardSurface,
+        containerColor = c.hubBackground,
         shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
         dragHandle = { SheetDragHandle() }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .imePadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 20.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("连接到 Mac", fontSize = 19.sp, fontWeight = FontWeight.Bold, color = c.inkPrimary)
-            Text(
-                "在 Mac 端「设置 → 局域网同步」中查看 6 位配对码。同一 Wi-Fi 下会自动发现设备。",
-                fontSize = 13.5.sp,
-                lineHeight = 19.sp,
-                color = c.inkSecondary
-            )
+            // Header: Title + Running Badge
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Wifi,
+                    contentDescription = null,
+                    tint = if (sync.running) c.logbookGreen else c.inkTertiary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    text = "WiFi 局域网同步",
+                    fontSize = 17.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = c.inkPrimary,
+                    modifier = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (sync.running) c.logbookGreenSoft else c.subtleFill)
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = if (sync.running) "UDP + HTTP 运行中" else "未启动",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (sync.running) c.logbookGreen else c.inkSecondary
+                    )
+                }
+            }
 
-            if (sync.pair == "wrong" || sync.pair == "locked") {
+            // Card 1: Local Device Info + Generate 6-digit Pairing Code
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(c.cardSurface)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = sync.deviceName.ifBlank { "Android 手机" },
+                            fontSize = 14.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = c.inkPrimary
+                        )
+                        Text(
+                            text = sync.address.ifBlank { "未检测到局域网 IP" },
+                            fontSize = 12.sp,
+                            color = c.inkSecondary
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            errorMsg = null
+                            vm.generatePairingCode()
+                        },
+                        shape = RoundedCornerShape(9.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = c.accentBlue, contentColor = Color.White),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("生成配对码", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                val activeCode = sync.activePairingCode
+                if (!activeCode.isNullOrBlank()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(c.accentBlueSoft)
+                            .padding(horizontal = 12.dp, vertical = 9.dp)
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = "在另一台设备输入（5 分钟有效）",
+                                fontSize = 11.sp,
+                                color = c.accentBlue
+                            )
+                            val formatted = if (activeCode.length == 6) "${activeCode.take(3)} ${activeCode.takeLast(3)}" else activeCode
+                            Text(
+                                text = formatted,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 2.sp,
+                                color = c.inkPrimary
+                            )
+                        }
+                        Text(
+                            text = "复制",
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = c.accentBlue,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(c.cardSurface)
+                                .clickable {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("TODO 配对码", activeCode))
+                                    resultMsg = "已复制 6 位配对码"
+                                }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+            }
+
+            // Progress / Success / Error Feedback Banners
+            busyMsg?.let { msg ->
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(c.dangerSoft)
-                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(c.cardSurface)
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
                 ) {
-                    Icon(Icons.Rounded.ErrorOutline, contentDescription = null, tint = c.danger, modifier = Modifier.size(18.dp))
-                    Text(
-                        text = if (sync.pair == "locked") "尝试次数过多，请 ${sync.retry} 秒后重试" else "配对码不匹配，请核对 Mac 端的 6 位配对码",
-                        fontSize = 13.sp,
-                        color = c.danger
-                    )
+                    CircularProgressIndicator(strokeWidth = 2.dp, color = c.accentBlue, modifier = Modifier.size(15.dp))
+                    Text(msg, fontSize = 12.5.sp, color = c.inkPrimary)
                 }
-            } else if (sync.peers.isNotEmpty()) {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+            }
+            resultMsg?.let { msg ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(c.elevatedSurface)
-                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(c.logbookGreenSoft)
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
                 ) {
-                    sync.peers.forEach { peer ->
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Box(
-                                Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(if (peer.ok) c.logbookGreen else c.todayGold)
-                            )
-                            Text(peer.addr, fontSize = 13.sp, color = c.inkPrimary, modifier = Modifier.weight(1f))
-                            Text(
-                                text = when {
-                                    peer.ok -> "已同步"
-                                    peer.pair == "wrong" -> "配对码错误"
-                                    peer.pair == "locked" -> "已锁定 (${peer.retry}s)"
-                                    else -> "连接中"
-                                },
-                                fontSize = 12.sp,
-                                color = if (peer.ok) c.logbookGreen else c.inkSecondary
-                            )
+                    Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = c.logbookGreen, modifier = Modifier.size(16.dp))
+                    Text(msg, fontSize = 12.5.sp, color = c.logbookGreen, fontWeight = FontWeight.Medium)
+                }
+            }
+            errorMsg?.let { msg ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(c.dangerSoft)
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
+                ) {
+                    Icon(Icons.Rounded.ErrorOutline, contentDescription = null, tint = c.danger, modifier = Modifier.size(16.dp))
+                    Text(msg, fontSize = 12.5.sp, color = c.danger)
+                }
+            }
+
+            // Card 2: Paired Devices
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "已配对设备",
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = c.inkSecondary,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(c.cardSurface)
+                ) {
+                    if (sync.pairedPeers.isEmpty()) {
+                        Text(
+                            text = "暂无已配对设备，请在下方选择发现的设备配对",
+                            fontSize = 12.5.sp,
+                            color = c.inkTertiary,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                        )
+                    } else {
+                        sync.pairedPeers.forEachIndexed { idx, peer ->
+                            val timeStr = if (peer.lastSyncAt > 0L) {
+                                " · 上次 " + java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                                    .format(java.util.Date(peer.lastSyncAt))
+                            } else ""
+                            val addrStr = if (peer.lastIp.isNotBlank()) "${peer.lastIp}:${if (peer.lastPort > 0) peer.lastPort else 8787}" else "离线"
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(if (peer.online) c.logbookGreen else c.inkTertiary.copy(alpha = 0.5f))
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        text = peer.deviceName.ifBlank { "未知设备" },
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = c.inkPrimary
+                                    )
+                                    Text(
+                                        text = "$addrStr$timeStr",
+                                        fontSize = 11.5.sp,
+                                        color = c.inkSecondary
+                                    )
+                                }
+                                Text(
+                                    text = "同步",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(c.accentBlue)
+                                        .clickable(enabled = busyMsg == null) {
+                                            busyMsg = "正在同步 ${peer.deviceName}…"
+                                            resultMsg = null
+                                            errorMsg = null
+                                            vm.syncWithPeer(peer.deviceId) { err ->
+                                                busyMsg = null
+                                                if (err != null) errorMsg = err else resultMsg = "已与 ${peer.deviceName} 完成同步"
+                                            }
+                                        }
+                                        .padding(horizontal = 11.dp, vertical = 5.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                IconButton(
+                                    onClick = { vm.deletePairedPeer(peer.deviceId) },
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.DeleteOutline,
+                                        contentDescription = "解除配对",
+                                        tint = c.inkTertiary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                            if (idx < sync.pairedPeers.lastIndex) {
+                                ThingsDivider(insetStart = 30.dp)
+                            }
                         }
                     }
                 }
             }
 
-            CleanRoundedInput(
-                value = code,
-                onValueChange = { code = it.filter { ch -> ch.isDigit() }.take(6) },
-                placeholder = "输入 6 位配对码",
-                keyboardType = KeyboardType.Number
-            )
-            CleanRoundedInput(
-                value = addr,
-                onValueChange = { addr = it },
-                placeholder = "Mac 地址（可选，如 192.168.1.5:8787）"
-            )
+            // Card 3: Discovered Devices via UDP
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "局域网发现的设备 (UDP)",
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = c.inkSecondary,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
-                    onClick = onSyncNow,
-                    shape = RoundedCornerShape(11.dp),
-                    modifier = Modifier.weight(1f).height(46.dp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(c.cardSurface)
                 ) {
-                    Text("立即同步", color = c.inkPrimary)
-                }
-                Button(
-                    onClick = {
-                        onPair(code, addr)
-                        onDismiss()
-                    },
-                    enabled = code.length == 6,
-                    shape = RoundedCornerShape(11.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = c.accentBlue, contentColor = Color.White),
-                    modifier = Modifier.weight(1f).height(46.dp)
-                ) {
-                    Text("配对并同步", fontWeight = FontWeight.SemiBold)
+                    if (sync.discoveredPeers.isEmpty()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                strokeWidth = 1.6.dp,
+                                color = c.inkTertiary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = "正在同一 Wi-Fi 下扫描其他 TODO 设备…",
+                                fontSize = 12.5.sp,
+                                color = c.inkTertiary
+                            )
+                        }
+                    } else {
+                        sync.discoveredPeers.forEachIndexed { idx, d ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(c.logbookGreen)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        text = d.deviceName.ifBlank { "TODO 设备" },
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = c.inkPrimary
+                                    )
+                                    Text(
+                                        text = "${d.ip}:${d.httpPort}",
+                                        fontSize = 11.5.sp,
+                                        color = c.inkSecondary
+                                    )
+                                }
+                                Text(
+                                    text = "配对",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = c.accentBlue,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(c.accentBlueSoft)
+                                        .clickable {
+                                            pairTarget = d
+                                            errorMsg = null
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                                )
+                            }
+                            if (idx < sync.discoveredPeers.lastIndex) {
+                                ThingsDivider(insetStart = 30.dp)
+                            }
+                        }
+                    }
                 }
             }
-            Spacer(Modifier.height(14.dp))
+
+            // Card 4: Confirm Pairing / Manual IP
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(c.cardSurface)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (pairTarget != null) "与 ${pairTarget!!.deviceName} (${pairTarget!!.ip}) 配对" else "手动输入 IP 配对",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = c.inkPrimary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (pairTarget != null) {
+                        Text(
+                            text = "切换手动",
+                            fontSize = 12.sp,
+                            color = c.accentBlue,
+                            modifier = Modifier.clickable { pairTarget = null }
+                        )
+                    }
+                }
+
+                if (pairTarget == null) {
+                    CleanRoundedInput(
+                        value = manualIp,
+                        onValueChange = { manualIp = it },
+                        placeholder = "对方局域网 IP（如 192.168.1.5）"
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        CleanRoundedInput(
+                            value = pairCode,
+                            onValueChange = { pairCode = it.filter { ch -> ch.isDigit() }.take(6) },
+                            placeholder = "6 位配对码",
+                            keyboardType = KeyboardType.Number
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            val ip = pairTarget?.ip ?: manualIp.trim()
+                            val port = pairTarget?.httpPort ?: 8787
+                            busyMsg = "正在与 $ip 配对…"
+                            errorMsg = null
+                            resultMsg = null
+                            vm.pairWithPeer(ip, port, pairCode) { res ->
+                                busyMsg = null
+                                res.onSuccess { peer ->
+                                    pairTarget = null
+                                    pairCode = ""
+                                    manualIp = ""
+                                    resultMsg = "已配对 ${peer.deviceName}，正在自动同步"
+                                }.onFailure { err ->
+                                    errorMsg = err.message ?: "配对失败"
+                                }
+                            }
+                        },
+                        enabled = busyMsg == null && pairCode.length == 6 && (pairTarget != null || manualIp.isNotBlank()),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = c.accentBlue, contentColor = Color.White),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        Text("确认配对", fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
         }
     }
 }

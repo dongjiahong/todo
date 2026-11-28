@@ -136,20 +136,37 @@ final class CoreBridge {
         return SyncStatus()
     }
 
-    func hostPairCode() -> String {
-        takeString(NavHostPairCode())
+    func generatePairingCode() -> String {
+        takeString(NavGeneratePairingCode())
     }
 
-    func regeneratePairCode() -> String {
-        takeString(NavRegeneratePairCode())
+    func pairWithPeer(ip: String, port: Int, code: String) -> (peer: PairedPeer?, error: String?) {
+        let raw = ip.withCString { ipPtr in
+            code.withCString { codePtr in
+                takeString(NavPairWithPeer(ipPtr, Int32(port), codePtr))
+            }
+        }
+        guard let data = raw.data(using: .utf8) else { return (nil, "配对失败") }
+        if let errObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let errMsg = errObj["error"] as? String {
+            return (nil, errMsg)
+        }
+        let peer = try? decoder.decode(PairedPeer.self, from: data)
+        return (peer, peer == nil ? "解析配对结果失败" : nil)
     }
 
-    func setPeerCode(_ code: String) {
-        _ = code.withCString { takeString(NavSetPeerCode($0)) }
+    func deletePairedPeer(deviceID: String) {
+        _ = deviceID.withCString { takeString(NavDeletePairedPeer($0)) }
     }
 
-    func addPeerAddress(_ addr: String) {
-        addr.withCString { NavAddPeerAddress($0) }
+    func syncWithPeer(deviceID: String) -> String? {
+        let raw = deviceID.withCString { takeString(NavSyncWithPeer($0)) }
+        if let data = raw.data(using: .utf8),
+           let errObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let errMsg = errObj["error"] as? String {
+            return errMsg
+        }
+        return nil
     }
 
     func syncNow() {

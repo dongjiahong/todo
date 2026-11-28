@@ -33,6 +33,7 @@ data class NavigatorUiState(
     val tags: List<TagItem> = emptyList(),
     val lists: List<TaskListItem> = emptyList(),
     val syncStatus: SyncStatus = SyncStatus(),
+    val isSyncing: Boolean = false,
     val searchQuery: String = "",
     val editingTaskId: String? = null,
     val undoMessage: UndoMessage? = null,
@@ -442,14 +443,55 @@ class NavigatorViewModel(app: Application) : AndroidViewModel(app) {
 
     // MARK: - Sync / Tags / Export / Attachments
 
-    fun pairWithMac(code: String, manualAddr: String) {
+    fun refreshSyncStatus() {
         viewModelScope.launch(Dispatchers.IO) {
-            if (manualAddr.isNotBlank()) {
-                repo.addPeerAddress(manualAddr.trim())
-            }
-            repo.setPeerCode(code.filter { it.isDigit() }.take(6))
-            repo.syncNow()
+            val status = repo.syncStatus()
+            _state.update { it.copy(syncStatus = status) }
+        }
+    }
+
+    fun generatePairingCode() {
+        viewModelScope.launch(Dispatchers.IO) {
+            repo.generatePairingCode()
+            val status = repo.syncStatus()
+            _state.update { it.copy(syncStatus = status) }
+        }
+    }
+
+    fun pairWithPeer(
+        ip: String,
+        port: Int,
+        code: String,
+        onResult: (Result<com.lele.navigator.model.PairedPeer>) -> Unit
+    ) {
+        _state.update { it.copy(isSyncing = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repo.pairWithPeer(ip.trim(), port, code.filter { it.isDigit() }.take(6))
             reloadInternal()
+            _state.update { it.copy(isSyncing = false) }
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                onResult(res)
+            }
+        }
+    }
+
+    fun deletePairedPeer(deviceId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repo.deletePairedPeer(deviceId)
+            val status = repo.syncStatus()
+            _state.update { it.copy(syncStatus = status) }
+        }
+    }
+
+    fun syncWithPeer(deviceId: String, onDone: (String?) -> Unit = {}) {
+        _state.update { it.copy(isSyncing = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val err = repo.syncWithPeer(deviceId)
+            reloadInternal()
+            _state.update { it.copy(isSyncing = false) }
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                onDone(err)
+            }
         }
     }
 

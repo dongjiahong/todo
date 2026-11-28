@@ -308,9 +308,8 @@ fun NavigatorRoot(vm: NavigatorViewModel = viewModel()) {
     if (showSyncSheet) {
         SyncPairingSheet(
             state = state,
-            onDismiss = { showSyncSheet = false },
-            onPair = { code, addr -> vm.pairWithMac(code, addr) },
-            onSyncNow = { vm.syncNow() }
+            vm = vm,
+            onDismiss = { showSyncSheet = false }
         )
     }
 

@@ -45,6 +45,15 @@ CREATE TABLE IF NOT EXISTS lists (
 );
 CREATE INDEX IF NOT EXISTS idx_lists_updated ON lists(updated_at);
 
+CREATE TABLE IF NOT EXISTS sync_peers (
+  device_id      TEXT PRIMARY KEY,
+  device_name    TEXT NOT NULL,
+  pairing_secret TEXT NOT NULL,
+  last_sync_at   INTEGER NOT NULL DEFAULT 0,
+  last_ip        TEXT NOT NULL DEFAULT '',
+  last_port      INTEGER NOT NULL DEFAULT 8787
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -348,6 +357,59 @@ func (s *Store) SetMeta(key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// ListSyncPeers returns all persistently paired LAN devices ordered by most recently synced.
+func (s *Store) ListSyncPeers() ([]model.PairedPeer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT device_id, device_name, pairing_secret, last_sync_at, last_ip, last_port FROM sync_peers ORDER BY last_sync_at DESC, device_name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]model.PairedPeer, 0)
+	for rows.Next() {
+		var p model.PairedPeer
+		if err := rows.Scan(&p.DeviceID, &p.DeviceName, &p.PairingSecret, &p.LastSyncAt, &p.LastIP, &p.LastPort); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out, rows.Err()
+}
+
+// UpsertSyncPeer saves or updates a paired peer record.
+func (s *Store) UpsertSyncPeer(p model.PairedPeer) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		INSERT INTO sync_peers (device_id, device_name, pairing_secret, last_sync_at, last_ip, last_port)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(device_id) DO UPDATE SET
+			device_name = excluded.device_name,
+			pairing_secret = excluded.pairing_secret,
+			last_ip = CASE WHEN excluded.last_ip != '' THEN excluded.last_ip ELSE sync_peers.last_ip END,
+			last_port = CASE WHEN excluded.last_port > 0 THEN excluded.last_port ELSE sync_peers.last_port END
+	`, p.DeviceID, p.DeviceName, p.PairingSecret, p.LastSyncAt, p.LastIP, p.LastPort)
+	return err
+}
+
+// UpdatePeerSyncMeta updates last_sync_at and last known address for a paired peer.
+func (s *Store) UpdatePeerSyncMeta(deviceID, ip string, port int, syncedAt int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`
+		UPDATE sync_peers SET last_sync_at = ?, last_ip = ?, last_port = ? WHERE device_id = ?
+	`, syncedAt, ip, port, deviceID)
+	return err
+}
+
+// DeleteSyncPeer removes a paired peer by device ID.
+func (s *Store) DeleteSyncPeer(deviceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM sync_peers WHERE device_id = ?`, deviceID)
 	return err
 }
 
